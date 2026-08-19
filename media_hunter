@@ -1,0 +1,1177 @@
+import asyncio
+import logging
+import os
+import sys
+import re
+import html
+import shlex
+import shutil
+import sqlite3
+import tempfile
+import time
+from datetime import datetime, timedelta
+from typing import Optional, Tuple, Dict, Any, List
+from io import BytesIO
+
+# Попытка импорта Pillow для генерации интерактивного предпросмотра водяного знака
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+
+import yt_dlp
+from aiogram import Bot, Dispatcher, F, Router, types
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import (
+    CallbackQuery,
+    FSInputFile,
+    BufferedInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    PreCheckoutQuery,
+    LabeledPrice
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("bot_activity.log", encoding="utf-8")
+    ]
+)
+logger = logging.getLogger("MediaHunter")
+
+ALLOWED_WM_POSITIONS = {"top_left", "top_right", "bottom_left", "bottom_right", "center"}
+ALLOWED_WM_COLORS = {"white", "yellow", "red", "green", "black"}
+ALLOWED_WM_SIZES = {20, 28, 36, 44}
+ALLOWED_WM_OPACITIES = {0.5, 0.8, 1.0}
+
+def escape_markdown(text: str) -> str:
+    """Минимально безопасный Markdown-экранирование динамического текста."""
+    return re.sub(r'([\\_*`\[\]])', r'\\\1', str(text or ""))
+
+def ffmpeg_drawtext_escape(text: str) -> str:
+    """Экранирует текст для FFmpeg drawtext."""
+    return (
+        str(text or "")
+        .replace("\\", r"\\")
+        .replace("'", r"\'")
+        .replace(":", r"\:")
+        .replace("%", r"\%")
+        .replace("[", r"\[")
+        .replace("]", r"\]")
+        .replace("\n", r"\n")
+    )
+
+def ffmpeg_filter_escape_path(path: str) -> str:
+    """Экранирует путь для параметра fontfile фильтра FFmpeg."""
+    return (
+        path.replace("\\", r"\\")
+            .replace(":", r"\:")
+            .replace("'", r"\'")
+            .replace("[", r"\[")
+            .replace("]", r"\]")
+            .replace(",", r"\,")
+    )
+
+def normalize_wm_settings(wm: tuple) -> tuple:
+    """Защищает FFmpeg/Pillow от некорректных значений из старой БД."""
+    text = str(wm[0] or "Media Hunter")[:30]
+    pos = wm[1] if wm[1] in ALLOWED_WM_POSITIONS else "bottom_right"
+    color = wm[2] if wm[2] in ALLOWED_WM_COLORS else "white"
+    try:
+        size = int(wm[3])
+    except (TypeError, ValueError):
+        size = 28
+    if size not in ALLOWED_WM_SIZES:
+        size = min(ALLOWED_WM_SIZES, key=lambda x: abs(x - size))
+    try:
+        opacity = float(wm[4])
+    except (TypeError, ValueError):
+        opacity = 0.8
+    opacity = min(1.0, max(0.1, opacity))
+    return text, pos, color, size, opacity
+
+def validate_url(url: str) -> bool:
+    return bool(re.match(r"^https?://[^\s]+$", url or "", re.IGNORECASE))
+
+# Чтение конфигурации из переменных окружения
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
+ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "123456789").split(",") if x.strip().isdigit()]
+
+# Основные системные константы
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_NAME = os.path.join(BASE_DIR, "bot_data.db")
+COOKIES_PATH = os.path.join(BASE_DIR, "cookies.txt")
+
+# Ограничения нагрузки (Оптимизировано для Oracle Cloud Free Tier)
+MAX_CONCURRENT_DOWNLOADS = 3
+MAX_RENDER_SIZE_MB = 49         # Telegram Bot API: держим запас ниже лимита загрузки
+MAX_VIDEO_DURATION_MINUTES = 60 # Максимальная длительность роликов
+
+# Поиск системного шрифта для FFmpeg и Pillow
+FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+if not os.path.exists(FONT_PATH):
+    FONT_PATH = os.path.join(BASE_DIR, "font.ttf")
+
+# Асинхронная приоритетная очередь задач (0 = High Priority / Premium, 1 = Normal Priority)
+task_queue = asyncio.PriorityQueue()
+active_tasks_count = 0
+
+def init_db():
+    """Создание таблиц и безопасная миграция старой БД."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            registered_at TEXT,
+            is_premium INTEGER DEFAULT 0,
+            premium_until TEXT,
+            referrals_count INTEGER DEFAULT 0,
+            referred_by INTEGER
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            channel_id TEXT NOT NULL,
+            channel_name TEXT,
+            auto_post INTEGER DEFAULT 1,
+            wm_text TEXT DEFAULT 'Media Hunter',
+            wm_position TEXT DEFAULT 'bottom_right',
+            wm_color TEXT DEFAULT 'white',
+            wm_font_size INTEGER DEFAULT 28,
+            wm_opacity REAL DEFAULT 0.8,
+            added_at TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS watermark_settings (
+            user_id INTEGER PRIMARY KEY,
+            text TEXT DEFAULT 'Media Hunter',
+            position TEXT DEFAULT 'bottom_right',
+            color TEXT DEFAULT 'white',
+            font_size INTEGER DEFAULT 28,
+            opacity REAL DEFAULT 0.8
+        )
+    """)
+
+    # Миграция БД, если таблица была создана старой версией.
+    existing = {row[1] for row in cursor.execute("PRAGMA table_info(channels)").fetchall()}
+    migrations = {
+        "auto_post": "INTEGER DEFAULT 1",
+        "wm_text": "TEXT DEFAULT 'Media Hunter'",
+        "wm_position": "TEXT DEFAULT 'bottom_right'",
+        "wm_color": "TEXT DEFAULT 'white'",
+        "wm_font_size": "INTEGER DEFAULT 28",
+        "wm_opacity": "REAL DEFAULT 0.8",
+        "added_at": "TEXT",
+    }
+    for column, definition in migrations.items():
+        if column not in existing:
+            cursor.execute(f"ALTER TABLE channels ADD COLUMN {column} {definition}")
+
+    conn.commit()
+    conn.close()
+    logger.info("База данных SQLite успешно инициализирована/мигрирована.")
+
+async def db_query(query: str, params: tuple = (), fetchone: bool = False, fetchall: bool = False, commit: bool = False) -> Any:
+    """Безопасный асинхронный вызов SQLite в отдельном потоке."""
+    def _execute():
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        res = None
+        if fetchone:
+            res = cursor.fetchone()
+        elif fetchall:
+            res = cursor.fetchall()
+        if commit:
+            conn.commit()
+        conn.close()
+        return res
+
+    return await asyncio.to_thread(_execute)
+
+class UserStates(StatesGroup):
+    waiting_for_wm_text = State()
+    waiting_for_channel_id = State()
+    waiting_for_channel_wm_text = State()
+
+class MediaTask:
+    """Объект задачи очереди скачивания и рендеринга."""
+    def __init__(self, priority: int, user_id: int, message_id: int, chat_id: int, url: Optional[str] = None, direct_file_id: Optional[str] = None, is_audio_only: bool = False):
+        self.priority = priority # 0: Premium, 1: Standard
+        self.timestamp = time.time()
+        self.user_id = user_id
+        self.message_id = message_id
+        self.chat_id = chat_id
+        self.url = url
+        self.direct_file_id = direct_file_id
+        self.is_audio_only = is_audio_only
+
+    def __lt__(self, other):
+        if self.priority == other.priority:
+            return self.timestamp < other.timestamp
+        return self.priority < other.priority
+
+async def ensure_user(user_id: int, username: str = "") -> None:
+    """Гарантирует наличие пользователя даже если он не нажал /start."""
+    existing = await db_query("SELECT user_id FROM users WHERE user_id = ?", (user_id,), fetchone=True)
+    if not existing:
+        await db_query(
+            "INSERT INTO users (user_id, username, registered_at) VALUES (?, ?, ?)",
+            (user_id, username or "Пользователь", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            commit=True
+        )
+    await db_query("INSERT OR IGNORE INTO watermark_settings (user_id) VALUES (?)", (user_id,), commit=True)
+
+async def is_user_premium(user_id: int) -> bool:
+    """Проверка наличия Премиум статуса."""
+    user = await db_query("SELECT is_premium, premium_until FROM users WHERE user_id = ?", (user_id,), fetchone=True)
+    if not user:
+        return False
+    is_prem, until_str = user[0], user[1]
+    if is_prem == 1:
+        if until_str:
+            try:
+                until_dt = datetime.strptime(until_str, "%Y-%m-%d %H:%M:%S")
+                if datetime.now() > until_dt:
+                    await db_query("UPDATE users SET is_premium = 0 WHERE user_id = ?", (user_id,), commit=True)
+                    return False
+            except Exception:
+                pass
+        return True
+    return False
+
+def get_main_keyboard(user_id: int, is_prem: bool = False) -> InlineKeyboardMarkup:
+    """Главное меню управления."""
+    is_admin = user_id in ADMIN_IDS
+    prem_badge = "⭐ (Premium)" if is_prem else "⭐ Купить Премиум"
+    
+    buttons = [
+        [InlineKeyboardButton(text="⚙️ Настройка Водяного Знака", callback_data="menu_watermark")],
+        [InlineKeyboardButton(text="📢 Мои Каналы / Автопостинг", callback_data="menu_channels")],
+        [InlineKeyboardButton(text=prem_badge, callback_data="menu_buy_stars"),
+         InlineKeyboardButton(text="🎁 Рефералы", callback_data="menu_ref")],
+        [InlineKeyboardButton(text="📊 Очередь", callback_data="menu_queue_status"),
+         InlineKeyboardButton(text="❓ Инструкция", callback_data="menu_help")]
+    ]
+    if is_admin:
+        buttons.append([InlineKeyboardButton(text="👑 Админ-Панель", callback_data="menu_admin")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_watermark_keyboard(wm_data: tuple, is_channel: bool = False, channel_db_id: Optional[int] = None) -> InlineKeyboardMarkup:
+    """Универсальная клавиатура управления параметрами водяного знака."""
+    text, pos, color, size, opacity = wm_data[0], wm_data[1], wm_data[2], wm_data[3], wm_data[4]
+    
+    pos_labels = {
+        "top_left": "↖️ Верх-Лево", "top_right": "↗️ Верх-Право",
+        "bottom_left": "↙️ Низ-Лево", "bottom_right": "↘️ Низ-Право",
+        "center": "⏹ Центр"
+    }
+    color_labels = {
+        "white": "⚪ Белый", "yellow": "🟡 Желтый",
+        "red": "🔴 Красный", "green": "🟢 Зеленый", "black": "⚫ Черный"
+    }
+
+    prefix = f"ch_wm_{channel_db_id}_" if is_channel else "wm_"
+
+    buttons = [
+        [InlineKeyboardButton(text=f"📝 Текст: {text}", callback_data=f"{prefix}set_text")],
+        [InlineKeyboardButton(text=f"📍 Позиция: {pos_labels.get(pos, pos)}", callback_data=f"{prefix}toggle_pos"),
+         InlineKeyboardButton(text=f"🎨 Цвет: {color_labels.get(color, color)}", callback_data=f"{prefix}toggle_color")],
+        [InlineKeyboardButton(text=f"🔤 Размер: {size}px", callback_data=f"{prefix}toggle_size"),
+         InlineKeyboardButton(text=f"✨ Прозрачность: {int(opacity * 100)}%", callback_data=f"{prefix}toggle_opacity")],
+        [InlineKeyboardButton(text="🖼 Предпросмотр кадра", callback_data=f"{prefix}preview_image")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_channels" if is_channel else "menu_main")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def generate_watermark_preview(text: str, pos: str, color: str, size: int, opacity: float) -> BytesIO:
+    """Создание фото-образца для виртуального предпросмотра наложенного водяного знака."""
+    if not HAS_PIL:
+        raise RuntimeError("Pillow не установлен. Установите pillow.")
+    text, pos, color, size, opacity = normalize_wm_settings((text, pos, color, size, opacity))
+    width, height = 800, 450
+    img = Image.new("RGBA", (width, height), (30, 33, 36, 255))
+    draw = ImageDraw.Draw(img)
+
+    for x in range(0, width, 40):
+        draw.line([(x, 0), (x, height)], fill=(45, 49, 54, 255), width=1)
+    for y in range(0, height, 40):
+        draw.line([(0, y), (width, y)], fill=(45, 49, 54, 255), width=1)
+
+    try:
+        title_font = ImageFont.truetype(FONT_PATH, 22)
+        wm_font = ImageFont.truetype(FONT_PATH, size)
+    except Exception:
+        title_font = ImageFont.load_default()
+        wm_font = ImageFont.load_default()
+
+    draw.text((width // 2, height // 2), "ОБРАЗЕЦ ВИДЕОКАДРА", fill=(110, 115, 125, 255), anchor="mm", font=title_font)
+
+    color_map = {
+        "white": (255, 255, 255), "yellow": (255, 223, 0),
+        "red": (235, 64, 52), "green": (52, 205, 88), "black": (0, 0, 0)
+    }
+    rgb = color_map.get(color, (255, 255, 255))
+    rgba_color = (rgb[0], rgb[1], rgb[2], int(opacity * 255))
+
+    padding = 20
+    pos_coords = {
+        "top_left": (padding, padding), "top_right": (width - padding, padding),
+        "bottom_left": (padding, height - padding), "bottom_right": (width - padding, height - padding),
+        "center": (width // 2, height // 2)
+    }
+    anchor_map = {
+        "top_left": "la", "top_right": "ra",
+        "bottom_left": "lb", "bottom_right": "rb", "center": "mm"
+    }
+
+    coord = pos_coords.get(pos, (width - padding, height - padding))
+    anc = anchor_map.get(pos, "rb")
+
+    text_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    text_draw = ImageDraw.Draw(text_layer)
+    text_draw.text(coord, text, fill=rgba_color, font=wm_font, anchor=anc)
+
+    combined = Image.alpha_composite(img, text_layer)
+    output = BytesIO()
+    combined.convert("RGB").save(output, format="JPEG", quality=90)
+    output.seek(0)
+    return output
+
+async def process_video_ffmpeg(input_path: str, output_path: str, wm_settings: tuple) -> bool:
+    """Обработка видео через FFmpeg с безопасным drawtext."""
+    wm_text, pos, color, font_size, opacity = normalize_wm_settings(wm_settings)
+
+    if not shutil.which("ffmpeg"):
+        logger.error("FFmpeg не найден в PATH.")
+        return False
+    if not os.path.isfile(input_path):
+        logger.error("Входной файл не найден: %s", input_path)
+        return False
+
+    pos_map = {
+        "top_left": "x=15:y=15",
+        "top_right": "x=w-tw-15:y=15",
+        "bottom_left": "x=15:y=h-th-15",
+        "bottom_right": "x=w-tw-15:y=h-th-15",
+        "center": "x=(w-tw)/2:y=(h-th)/2",
+    }
+    coord = pos_map.get(pos, pos_map["bottom_right"])
+    color_param = f"{color}@{opacity:.3f}"
+    text_escaped = ffmpeg_drawtext_escape(wm_text)
+    font_escaped = ffmpeg_filter_escape_path(FONT_PATH)
+
+    filter_complex = (
+        f"eq=brightness=0.01:saturation=1.02,"
+        f"drawtext=text='{text_escaped}':fontfile='{font_escaped}':"
+        f"fontsize={font_size}:fontcolor={color_param}:{coord}"
+    )
+
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", input_path,
+        "-vf", filter_complex,
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "26",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.error("FFmpeg error: %s", stderr.decode(errors="replace")[-5000:])
+            return False
+        if not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
+            logger.error("FFmpeg завершился без выходного файла.")
+            return False
+        return True
+    except Exception:
+        logger.exception("Исключение при вызове FFmpeg")
+        return False
+
+async def download_media(url: str, output_dir: str, extract_audio: bool = False) -> Optional[Dict[str, Any]]:
+    """Скачивание медиа через yt-dlp с проверкой длительности и размера."""
+    if not validate_url(url):
+        logger.warning("Отклонена некорректная URL: %s", url)
+        return None
+    if not shutil.which("ffmpeg") and extract_audio:
+        logger.error("Для извлечения MP3 требуется FFmpeg.")
+        return None
+
+    out_template = os.path.join(output_dir, "downloaded_media.%(ext)s")
+    if extract_audio:
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": os.path.join(output_dir, "audio.%(ext)s"),
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }],
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+        }
+    else:
+        ydl_opts = {
+            "format": "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "outtmpl": out_template,
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "merge_output_format": "mp4",
+        }
+
+    if os.path.exists(COOKIES_PATH):
+        ydl_opts["cookiefile"] = COOKIES_PATH
+
+    def _extract_and_download():
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if not info:
+                return None
+            duration = float(info.get("duration") or 0)
+            if duration > MAX_VIDEO_DURATION_MINUTES * 60:
+                raise ValueError(f"Видео превышает лимит ({MAX_VIDEO_DURATION_MINUTES} мин).")
+
+            downloaded_info = ydl.extract_info(url, download=True)
+            if not downloaded_info:
+                return None
+            if "entries" in downloaded_info:
+                entries = [x for x in (downloaded_info.get("entries") or []) if x]
+                if not entries:
+                    return None
+                downloaded_info = entries[0]
+
+            if extract_audio:
+                filename = os.path.join(output_dir, "audio.mp3")
+                if not os.path.isfile(filename):
+                    # yt-dlp может выбрать другой исходный ext; ищем итоговый mp3.
+                    mp3s = [os.path.join(output_dir, x) for x in os.listdir(output_dir) if x.lower().endswith(".mp3")]
+                    if mp3s:
+                        filename = mp3s[0]
+            else:
+                filename = ydl.prepare_filename(downloaded_info)
+                if not os.path.isfile(filename):
+                    candidates = [
+                        os.path.join(output_dir, x) for x in os.listdir(output_dir)
+                        if os.path.isfile(os.path.join(output_dir, x))
+                    ]
+                    if candidates:
+                        filename = max(candidates, key=os.path.getsize)
+
+            if not os.path.isfile(filename):
+                raise FileNotFoundError("yt-dlp не создал ожидаемый файл.")
+
+            actual_size_mb = os.path.getsize(filename) / (1024 * 1024)
+            if actual_size_mb > MAX_RENDER_SIZE_MB:
+                raise ValueError(f"Файл слишком большой: {actual_size_mb:.1f} МБ (лимит {MAX_RENDER_SIZE_MB} МБ).")
+
+            return {
+                "filepath": filename,
+                "title": downloaded_info.get("title", "Медиа файл"),
+                "duration": duration,
+                "size_mb": actual_size_mb,
+            }
+
+    try:
+        return await asyncio.to_thread(_extract_and_download)
+    except Exception as e:
+        logger.error("Ошибка загрузки через yt-dlp: %s", e)
+        return None
+
+router = Router()
+
+@router.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    user_id = message.from_user.id
+    username = message.from_user.username or "Пользователь"
+    args = message.text.split(maxsplit=1)
+    
+    referrer_id = None
+    if len(args) > 1 and args[1].startswith("ref_"):
+        try:
+            referrer_id = int(args[1].replace("ref_", ""))
+            if referrer_id == user_id: referrer_id = None
+        except ValueError: referrer_id = None
+
+    existing = await db_query("SELECT user_id FROM users WHERE user_id = ?", (user_id,), fetchone=True)
+    if not existing:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        await db_query("INSERT INTO users (user_id, username, registered_at, referred_by) VALUES (?, ?, ?, ?)",
+                       (user_id, username, now_str, referrer_id), commit=True)
+        await db_query("INSERT OR IGNORE INTO watermark_settings (user_id) VALUES (?)", (user_id,), commit=True)
+
+        if referrer_id:
+            await db_query("UPDATE users SET referrals_count = referrals_count + 1 WHERE user_id = ?", (referrer_id,), commit=True)
+
+    is_prem = await is_user_premium(user_id)
+    text = (
+        f"👋 **Привет, {message.from_user.first_name}!**\n\n"
+        f"🚀 **Media Hunter** — бот для скачивания и уникализации видео из **YouTube**, **Instagram** и **TikTok**!\n\n"
+        f"💡 **Что умеет бот?**\n"
+        f"1. Скачивать видео по ссылкам или извлекать **MP3** аудио.\n"
+        f"2. Обрабатывать загруженные из галереи видео до 80 МБ.\n"
+        f"3. Накладывать уникальный водяной знак с тонкой настройкой.\n"
+        f"4. Автопостинг в ваши Telegram-каналы!\n\n"
+        f"👇 *Просто отправьте мне ссылку на ролик или видеофайл из галереи:* "
+    )
+    await message.answer(text, reply_markup=get_main_keyboard(user_id, is_prem), parse_mode="Markdown")
+
+@router.callback_query(F.data == "menu_main")
+async def back_to_main_menu(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    await state.clear()
+    is_prem = await is_user_premium(call.from_user.id)
+    await call.message.edit_text(
+        "🏠 **Главное меню**\n\nВыберите нужный раздел или отправьте ссылку / видеофайл:",
+        reply_markup=get_main_keyboard(call.from_user.id, is_prem),
+        parse_mode="Markdown"
+    )
+
+@router.callback_query(F.data == "menu_watermark")
+async def watermark_settings_menu(call: CallbackQuery):
+    await call.answer()
+    user_id = call.from_user.id
+    wm = await db_query("SELECT text, position, color, font_size, opacity FROM watermark_settings WHERE user_id = ?", (user_id,), fetchone=True)
+    if not wm:
+        await db_query("INSERT INTO watermark_settings (user_id) VALUES (?)", (user_id,), commit=True)
+        wm = ("Media Hunter", "bottom_right", "white", 28, 0.8)
+
+    text = (
+        "⚙️ **Настройки Основного Водяного Знака**\n\n"
+        "Этот знак будет накладываться на скачиваемые видео и файлы из галереи:\n"
+        "• Изменяйте текст, цвет, позицию и прозрачность.\n"
+        "• Воспользуйтесь предпросмотром, чтобы оценить дизайн."
+    )
+    await call.message.edit_text(text, reply_markup=get_watermark_keyboard(wm), parse_mode="Markdown")
+
+@router.callback_query(F.data == "wm_preview_image")
+async def preview_watermark_callback(call: CallbackQuery):
+    await call.answer("Генерация предпросмотра...")
+    user_id = call.from_user.id
+    wm = await db_query("SELECT text, position, color, font_size, opacity FROM watermark_settings WHERE user_id = ?", (user_id,), fetchone=True)
+    if not wm: wm = ("Media Hunter", "bottom_right", "white", 28, 0.8)
+
+    if not HAS_PIL:
+        await call.message.answer("⚠️ Предпросмотр недоступен: Pillow не установлен на сервере.")
+        return
+    buf = await asyncio.to_thread(generate_watermark_preview, wm[0], wm[1], wm[2], wm[3], wm[4])
+    photo = BufferedInputFile(buf.getvalue(), filename="preview.jpg")
+
+    caption = (
+        f"🖼 **Образец водяного знака**\n\n"
+        f"📝 Текст: `{wm[0]}` | 📍 Позиция: `{wm[1]}`\n"
+        f"🎨 Цвет: `{wm[2]}` | 🔤 Размер: `{wm[3]}px` | ✨ Прозрачность: `{int(wm[4]*100)}%`"
+    )
+    await call.message.answer_photo(photo=photo, caption=caption, reply_markup=get_watermark_keyboard(wm), parse_mode="Markdown")
+
+@router.callback_query(F.data == "wm_set_text")
+async def prompt_wm_text(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    await state.set_state(UserStates.waiting_for_wm_text)
+    await call.message.edit_text(
+        "✍️ **Введите новый текст водяного знака (до 30 символов):**",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Отмена", callback_data="menu_watermark")]]),
+        parse_mode="Markdown"
+    )
+
+@router.message(UserStates.waiting_for_wm_text)
+async def save_wm_text(message: Message, state: FSMContext):
+    if not message.text:
+        await message.reply("⚠️ Пожалуйста, отправьте текстовое сообщение.")
+        return
+
+    text = message.text.strip()[:30]
+    await db_query("UPDATE watermark_settings SET text = ? WHERE user_id = ?", (text, message.from_user.id), commit=True)
+    await state.clear()
+    
+    wm = await db_query("SELECT text, position, color, font_size, opacity FROM watermark_settings WHERE user_id = ?", (message.from_user.id,), fetchone=True)
+    await message.answer("✅ Текст сохранен!", reply_markup=get_watermark_keyboard(wm))
+
+@router.callback_query(F.data.startswith("wm_toggle_"))
+async def toggle_wm_options(call: CallbackQuery):
+    action = call.data.replace("wm_toggle_", "")
+    user_id = call.from_user.id
+    wm = await db_query("SELECT text, position, color, font_size, opacity FROM watermark_settings WHERE user_id = ?", (user_id,), fetchone=True)
+    if not wm: wm = ("Media Hunter", "bottom_right", "white", 28, 0.8)
+
+    if action == "pos":
+        positions = ["top_left", "top_right", "bottom_left", "bottom_right", "center"]
+        val = positions[(positions.index(wm[1]) + 1) % len(positions)]
+        await db_query("UPDATE watermark_settings SET position = ? WHERE user_id = ?", (val, user_id), commit=True)
+    elif action == "color":
+        colors = ["white", "yellow", "red", "green", "black"]
+        val = colors[(colors.index(wm[2]) + 1) % len(colors)]
+        await db_query("UPDATE watermark_settings SET color = ? WHERE user_id = ?", (val, user_id), commit=True)
+    elif action == "size":
+        sizes = [20, 28, 36, 44]
+        val = sizes[(sizes.index(wm[3]) + 1) % len(sizes)]
+        await db_query("UPDATE watermark_settings SET font_size = ? WHERE user_id = ?", (val, user_id), commit=True)
+    elif action == "opacity":
+        opacities = [0.5, 0.8, 1.0]
+        val = opacities[(opacities.index(wm[4]) + 1) % len(opacities)]
+        await db_query("UPDATE watermark_settings SET opacity = ? WHERE user_id = ?", (val, user_id), commit=True)
+
+    new_wm = await db_query("SELECT text, position, color, font_size, opacity FROM watermark_settings WHERE user_id = ?", (user_id,), fetchone=True)
+    await call.message.edit_reply_markup(reply_markup=get_watermark_keyboard(new_wm))
+
+@router.callback_query(F.data == "menu_channels")
+async def channels_menu(call: CallbackQuery):
+    await call.answer()
+    user_id = call.from_user.id
+    is_prem = await is_user_premium(user_id)
+    max_channels = 3 if is_prem else 1
+
+    channels = await db_query("SELECT id, channel_name, channel_id, auto_post FROM channels WHERE user_id = ?", (user_id,), fetchall=True)
+    
+    text = (
+        f"📢 **Управление Каналами и Автопостингом**\n\n"
+        f"Ваш статус: **{'⭐ Premium (до 3 каналов)' if is_prem else '👤 Free (до 1 канала)'}**\n\n"
+    )
+    buttons = []
+    if not channels:
+        text += "❌ У вас пока нет привязанных каналов.\n"
+    else:
+        for ch in channels:
+            ch_db_id, ch_name, ch_id, auto_post = ch[0], ch[1], ch[2], ch[3]
+            ap_status = "🟢 Автопостинг ВКЛ" if auto_post else "🔴 Автопостинг ВЫКЛ"
+            text += f"• **{ch_name}** (`{ch_id}`) | {ap_status}\n"
+            
+            buttons.append([
+                InlineKeyboardButton(text=f"⚙️ Знак: {ch_name}", callback_data=f"ch_wm_menu_{ch_db_id}"),
+                InlineKeyboardButton(text=f"{'🔴 Выкл' if auto_post else '🟢 Вкл'}", callback_data=f"ch_toggle_ap_{ch_db_id}"),
+                InlineKeyboardButton(text="❌", callback_data=f"del_channel_{ch_db_id}")
+            ])
+
+    if len(channels) < max_channels:
+        buttons.append([InlineKeyboardButton(text="➕ Привязать канал", callback_data="add_user_channel")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_main")])
+
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+
+@router.callback_query(F.data == "add_user_channel")
+async def add_channel_callback(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    user_id = call.from_user.id
+    is_prem = await is_user_premium(user_id)
+    max_channels = 3 if is_prem else 1
+
+    count_row = await db_query("SELECT COUNT(*) FROM channels WHERE user_id = ?", (user_id,), fetchone=True)
+    if count_row and count_row[0] >= max_channels:
+        await call.message.answer(f"⚠️ Лимит каналов ({max_channels}) исчерпан. Оформите Premium для 3 каналов!")
+        return
+
+    await state.set_state(UserStates.waiting_for_channel_id)
+    text = (
+        "📩 **Как привязать Telegram канал:**\n\n"
+        "1. Добавьте бота в администраторы канала.\n"
+        "2. Отправьте `@username` или `-100xxxxxxxxx` ID канала:"
+    )
+    await call.message.edit_text(text, parse_mode="Markdown")
+
+@router.message(UserStates.waiting_for_channel_id)
+async def save_channel_id(message: Message, state: FSMContext):
+    if not message.text:
+        await message.reply("⚠️ Отправьте @username или числовой ID канала.")
+        return
+
+    ch_input = message.text.strip()
+    if not (ch_input.startswith("@") or re.fullmatch(r"-100\d{5,20}", ch_input)):
+        await message.reply("⚠️ Формат канала должен быть @username или -100xxxxxxxxxx.")
+        return
+
+    try:
+        chat = await message.bot.get_chat(ch_input)
+        me = await message.bot.get_me()
+        member = await message.bot.get_chat_member(chat.id, me.id)
+        if member.status not in ("administrator", "creator"):
+            await message.reply("⚠️ Бот должен быть администратором канала с правом публикации.")
+            return
+        channel_name = chat.title or ch_input
+        channel_id = str(chat.id)
+    except Exception as e:
+        logger.warning("Не удалось проверить канал %s: %s", ch_input, e)
+        await message.reply(
+            "❌ Не удалось получить канал. Проверьте ID/username и убедитесь, что бот добавлен в канал администратором."
+        )
+        return
+
+    exists = await db_query(
+        "SELECT id FROM channels WHERE user_id = ? AND channel_id = ?",
+        (message.from_user.id, channel_id), fetchone=True
+    )
+    if exists:
+        await state.clear()
+        await message.answer("ℹ️ Этот канал уже привязан.", reply_markup=get_main_keyboard(message.from_user.id))
+        return
+
+    # Копируем текущий основной watermark как стартовые настройки канала.
+    wm = await db_query(
+        "SELECT text, position, color, font_size, opacity FROM watermark_settings WHERE user_id = ?",
+        (message.from_user.id,), fetchone=True
+    ) or ("Media Hunter", "bottom_right", "white", 28, 0.8)
+    await db_query(
+        """INSERT INTO channels
+           (user_id, channel_id, channel_name, auto_post, wm_text, wm_position, wm_color, wm_font_size, wm_opacity, added_at)
+           VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)""",
+        (message.from_user.id, channel_id, channel_name, *normalize_wm_settings(wm),
+         datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        commit=True
+    )
+    await state.clear()
+    await message.answer("✅ Канал успешно проверен и добавлен!", reply_markup=get_main_keyboard(message.from_user.id))
+
+@router.callback_query(F.data.startswith("ch_toggle_ap_"))
+async def toggle_channel_autopost(call: CallbackQuery):
+    ch_db_id = call.data.replace("ch_toggle_ap_", "")
+    ch = await db_query("SELECT auto_post FROM channels WHERE id = ? AND user_id = ?", (ch_db_id, call.from_user.id), fetchone=True)
+    if ch:
+        new_ap = 0 if ch[0] else 1
+        await db_query("UPDATE channels SET auto_post = ? WHERE id = ?", (new_ap, ch_db_id), commit=True)
+    await channels_menu(call)
+
+@router.callback_query(F.data.startswith("del_channel_"))
+async def delete_channel(call: CallbackQuery):
+    ch_db_id = call.data.replace("del_channel_", "")
+    await db_query("DELETE FROM channels WHERE id = ? AND user_id = ?", (ch_db_id, call.from_user.id), commit=True)
+    await channels_menu(call)
+
+@router.callback_query(F.data.startswith("ch_wm_menu_"))
+async def channel_watermark_menu(call: CallbackQuery):
+    await call.answer()
+    try:
+        ch_db_id = int(call.data.replace("ch_wm_menu_", ""))
+    except ValueError:
+        await call.answer("Некорректный канал", show_alert=True)
+        return
+    row = await db_query(
+        """SELECT wm_text, wm_position, wm_color, wm_font_size, wm_opacity, channel_name
+           FROM channels WHERE id = ? AND user_id = ?""",
+        (ch_db_id, call.from_user.id), fetchone=True
+    )
+    if not row:
+        await call.answer("Канал не найден", show_alert=True)
+        return
+    wm = row[:5]
+    text = f"⚙️ **Водяной знак канала: {escape_markdown(row[5])}**\n\nНастройки применяются к автопостингу этого канала."
+    await call.message.edit_text(
+        text, reply_markup=get_watermark_keyboard(wm, is_channel=True, channel_db_id=ch_db_id),
+        parse_mode="Markdown"
+    )
+
+@router.callback_query(F.data.startswith("ch_wm_"))
+async def channel_watermark_toggle(call: CallbackQuery, state: FSMContext):
+    data = call.data
+    m = re.match(r"^ch_wm_(\d+)_(set_text|toggle_pos|toggle_color|toggle_size|toggle_opacity|preview_image)$", data)
+    if not m:
+        return
+    ch_id = int(m.group(1))
+    action = m.group(2)
+    row = await db_query(
+        """SELECT wm_text, wm_position, wm_color, wm_font_size, wm_opacity, channel_name
+           FROM channels WHERE id = ? AND user_id = ?""",
+        (ch_id, call.from_user.id), fetchone=True
+    )
+    if not row:
+        await call.answer("Канал не найден", show_alert=True)
+        return
+    if action == "set_text":
+        await state.set_state(UserStates.waiting_for_channel_wm_text)
+        await state.update_data(channel_db_id=ch_id)
+        await call.answer()
+        await call.message.edit_text(
+            "✍️ **Введите текст водяного знака канала (до 30 символов):**\n\n◀️ Для отмены используйте /start",
+            parse_mode="Markdown"
+        )
+        return
+    if action == "preview_image":
+        if not HAS_PIL:
+            await call.answer("Pillow не установлен", show_alert=True)
+            return
+        buf = await asyncio.to_thread(generate_watermark_preview, *row[:5])
+        await call.message.answer_photo(
+            BufferedInputFile(buf.getvalue(), filename="channel_preview.jpg"),
+            caption="🖼 Предпросмотр водяного знака канала"
+        )
+        await call.answer()
+        return
+
+    text, pos, color, size, opacity = row[:5]
+    if action == "toggle_pos":
+        vals = list(ALLOWED_WM_POSITIONS)
+        # Стабильный порядок
+        vals = ["top_left", "top_right", "bottom_left", "bottom_right", "center"]
+        pos = vals[(vals.index(pos) + 1) % len(vals)] if pos in vals else vals[0]
+    elif action == "toggle_color":
+        vals = ["white", "yellow", "red", "green", "black"]
+        color = vals[(vals.index(color) + 1) % len(vals)] if color in vals else vals[0]
+    elif action == "toggle_size":
+        vals = [20, 28, 36, 44]
+        size = vals[(vals.index(int(size)) + 1) % len(vals)] if int(size) in vals else 28
+    elif action == "toggle_opacity":
+        vals = [0.5, 0.8, 1.0]
+        opacity = vals[(vals.index(float(opacity)) + 1) % len(vals)] if float(opacity) in vals else 0.8
+
+    await db_query(
+        """UPDATE channels SET wm_position=?, wm_color=?, wm_font_size=?, wm_opacity=?
+           WHERE id=? AND user_id=?""",
+        (pos, color, size, opacity, ch_id, call.from_user.id), commit=True
+    )
+    new_wm = await db_query(
+        "SELECT wm_text, wm_position, wm_color, wm_font_size, wm_opacity FROM channels WHERE id=? AND user_id=?",
+        (ch_id, call.from_user.id), fetchone=True
+    )
+    await call.answer()
+    await call.message.edit_reply_markup(
+        reply_markup=get_watermark_keyboard(new_wm, is_channel=True, channel_db_id=ch_id)
+    )
+
+@router.message(UserStates.waiting_for_channel_wm_text)
+async def save_channel_wm_text(message: Message, state: FSMContext):
+    if not message.text:
+        await message.reply("⚠️ Отправьте текстовое сообщение.")
+        return
+    data = await state.get_data()
+    ch_id = data.get("channel_db_id")
+    if not ch_id:
+        await state.clear()
+        await message.answer("❌ Сессия настройки истекла.")
+        return
+    text = message.text.strip()[:30] or "Media Hunter"
+    await db_query(
+        "UPDATE channels SET wm_text=? WHERE id=? AND user_id=?",
+        (text, ch_id, message.from_user.id), commit=True
+    )
+    await state.clear()
+    row = await db_query(
+        "SELECT wm_text, wm_position, wm_color, wm_font_size, wm_opacity FROM channels WHERE id=? AND user_id=?",
+        (ch_id, message.from_user.id), fetchone=True
+    )
+    await message.answer(
+        "✅ Текст водяного знака канала сохранен.",
+        reply_markup=get_watermark_keyboard(row, is_channel=True, channel_db_id=ch_id)
+    )
+
+@router.callback_query(F.data == "menu_buy_stars")
+async def buy_stars_menu(call: CallbackQuery):
+    await call.answer()
+    text = (
+        "⭐ **Премиум Доступ за Telegram Stars**\n\n"
+        "🔥 **Преимущества Премиума:**\n"
+        "• ⚡ **Приоритет №1 в очереди** (мгновенный рендеринг).\n"
+        "• 📢 Привязка **до 3-х Telegram-каналов**.\n"
+        "• ⚙️ **Индивидуальные водяные знаки** для каждого канала.\n"
+        "• 🔄 Автоматический автопостинг обработанных видео.\n\n"
+        "Стоимость: **150 Stars / месяц**"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="⭐ Оплатить 150 Stars", callback_data="pay_stars_150")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_main")]
+    ]
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+
+@router.callback_query(F.data == "pay_stars_150")
+async def send_stars_invoice(call: CallbackQuery):
+    await call.answer()
+    prices = [LabeledPrice(label="Media Hunter Premium (30 дней)", amount=150)]
+    await call.bot.send_invoice(
+        chat_id=call.from_user.id,
+        title="⭐ Media Hunter Premium",
+        description="Подписка на 30 дней: Высокий приоритет + 3 канала + персональные водяные знаки",
+        payload="premium_30_days",
+        provider_token="", # Пустая строка для Telegram Stars!
+        currency="XTR",
+        prices=prices
+    )
+
+@router.pre_checkout_query()
+async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
+    await pre_checkout_query.answer(ok=True)
+
+@router.message(F.successful_payment)
+async def process_successful_payment(message: Message):
+    user_id = message.from_user.id
+    await ensure_user(user_id, message.from_user.username or "User")
+    current = await db_query("SELECT premium_until FROM users WHERE user_id = ?", (user_id,), fetchone=True)
+    start_from = datetime.now()
+    if current and current[0]:
+        try:
+            start_from = max(start_from, datetime.strptime(current[0], "%Y-%m-%d %H:%M:%S"))
+        except ValueError:
+            pass
+    until = (start_from + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    await db_query("UPDATE users SET is_premium = 1, premium_until = ? WHERE user_id = ?", (until, user_id), commit=True)
+    
+    await message.answer(
+        "🎉 **Спасибо за покупку!**\n\n"
+        "Ваш **Премиум Статус** успешно активирован на 30 дней!\n"
+        "Теперь вам доступны приоритетная очередь и до 3 каналов автопостинга.",
+        reply_markup=get_main_keyboard(user_id, True),
+        parse_mode="Markdown"
+    )
+
+@router.callback_query(F.data == "menu_ref")
+async def referral_menu(call: CallbackQuery):
+    await call.answer()
+    bot_info = await call.bot.get_me()
+    user_id = call.from_user.id
+    ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_id}"
+    
+    row = await db_query("SELECT referrals_count FROM users WHERE user_id = ?", (user_id,), fetchone=True)
+    ref_count = row[0] if row else 0
+
+    text = (
+        f"🎁 **Реферальная система**\n\n"
+        f"Приглашайте друзей по вашей ссылке:\n`{ref_link}`\n\n"
+        f"👥 Приглашено пользователем: **{ref_count}**\n"
+        f"💡 За каждые **5 друзей** вы получаете **7 дней Премиума**!"
+    )
+    buttons = [[InlineKeyboardButton(text="◀️ Назад", callback_data="menu_main")]]
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+
+@router.callback_query(F.data == "menu_queue_status")
+async def queue_status_menu(call: CallbackQuery):
+    await call.answer()
+    q_size = task_queue.qsize()
+    text = (
+        f"📊 **Статус Очереди**\n\n"
+        f"⚙️ Активных видео в рендеринге: **{active_tasks_count} / {MAX_CONCURRENT_DOWNLOADS}**\n"
+        f"⏳ Задач в очереди: **{q_size}**\n\n"
+        f"💡 *Задачи Премиум-пользователей обрабатываются с высшим приоритетом.*"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_queue_status")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_main")]
+    ]
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+
+@router.callback_query(F.data == "menu_help")
+async def help_menu(call: CallbackQuery):
+    await call.answer()
+    text = (
+        f"❓ **Справка и Инструкция**\n\n"
+        f"🌐 **Поддерживаемые платформы:**\n"
+        f"• **YouTube:** Shorts, длинные видео, плейлисты.\n"
+        f"• **Instagram:** Reels, публикации.\n"
+        f"• **TikTok:** Видео без водяного знака платформы.\n\n"
+        f"📱 **Загрузка из галереи:**\n"
+        f"Просто отправьте видеофайл до {MAX_RENDER_SIZE_MB} МБ прямо в чат для уникализации и водяного знака!"
+    )
+    buttons = [[InlineKeyboardButton(text="◀️ Назад", callback_data="menu_main")]]
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+
+@router.message(F.video | F.document)
+async def handle_direct_video_upload(message: Message):
+    """Обработка прямого файла из галереи."""
+    file = message.video or message.document
+    if not file: return
+
+    if file.file_size and file.file_size > MAX_RENDER_SIZE_MB * 1024 * 1024:
+        await message.reply(f"⚠️ Размер файла превышает лимит {MAX_RENDER_SIZE_MB} МБ.")
+        return
+    if message.document:
+        mime = (message.document.mime_type or "").lower()
+        if not mime.startswith("video/"):
+            await message.reply("⚠️ Документ не является видеофайлом. Отправьте MP4/MOV/MKV или видео как файл.")
+            return
+
+    user_id = message.from_user.id
+    await ensure_user(user_id, message.from_user.username or "Пользователь")
+    is_prem = await is_user_premium(user_id)
+    priority = 0 if is_prem else 1
+
+    msg = await message.reply("⏳ Видео из галереи получено! Добавлено в очередь уникализации...")
+    task = MediaTask(priority=priority, user_id=user_id, message_id=msg.message_id, chat_id=message.chat.id, direct_file_id=file.file_id)
+    await task_queue.put(task)
+
+@router.message(F.text.regexp(r'https?://[^\s]+'))
+async def handle_video_link(message: Message):
+    """Обработка интернет-ссылок."""
+    url = message.text.strip()
+    user_id = message.from_user.id
+    await ensure_user(user_id, message.from_user.username or "Пользователь")
+    is_prem = await is_user_premium(user_id)
+    priority = 0 if is_prem else 1
+
+    # Кнопка выбора формата
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎬 Видео с водяным знаком", callback_data=f"dl_vid_{priority}")],
+        [InlineKeyboardButton(text="🎵 Извлечь MP3 Аудио", callback_data=f"dl_aud_{priority}")]
+    ])
+
+    await message.reply("🎯 Ссылка принята! Выберите формат скачивания:", reply_markup=keyboard)
+
+@router.callback_query(F.data.startswith("dl_vid_") | F.data.startswith("dl_aud_"))
+async def start_link_download(call: CallbackQuery):
+    await call.answer()
+    is_audio = call.data.startswith("dl_aud_")
+    # Do not use callback_data as the source of access-control information.
+    await ensure_user(call.from_user.id, call.from_user.username or "User")
+    priority = 0 if await is_user_premium(call.from_user.id) else 1
+    
+    url = call.message.reply_to_message.text.strip() if call.message.reply_to_message else None
+    if not url:
+        await call.message.edit_text("❌ Ошибка: не удалось прочитать ссылку.")
+        return
+
+    await call.message.edit_text("⏳ Задача добавлена в очередь обработки...")
+    task = MediaTask(priority=priority, user_id=call.from_user.id, message_id=call.message.message_id, chat_id=call.message.chat.id, url=url, is_audio_only=is_audio)
+    await task_queue.put(task)
+
+async def queue_worker(bot: Bot, worker_id: int):
+    """Фоновый воркер очереди. Несколько воркеров дают реальное ограничение параллелизма."""
+    global active_tasks_count
+    logger.info("Воркер %s запущен.", worker_id)
+
+    while True:
+        task: MediaTask = await task_queue.get()
+        active_tasks_count += 1
+        try:
+            await bot.edit_message_text(
+                "📥 Обработка медиафайла...",
+                chat_id=task.chat_id, message_id=task.message_id
+            )
+
+            with tempfile.TemporaryDirectory(prefix="mediahunter_") as tmp_dir:
+                filepath = None
+                title = "Медиа файл"
+
+                if task.direct_file_id:
+                    tg_file = await bot.get_file(task.direct_file_id)
+                    if not tg_file.file_path:
+                        raise RuntimeError("Telegram не вернул путь к файлу.")
+                    filepath = os.path.join(tmp_dir, "input_gallery")
+                    await bot.download_file(tg_file.file_path, destination=filepath)
+                elif task.url:
+                    dl_result = await download_media(task.url, tmp_dir, extract_audio=task.is_audio_only)
+                    if not dl_result:
+                        await bot.edit_message_text(
+                            "❌ Не удалось скачать файл по ссылке.",
+                            chat_id=task.chat_id, message_id=task.message_id
+                        )
+                        continue
+                    filepath = dl_result["filepath"]
+                    title = dl_result["title"]
+
+                if not filepath or not os.path.isfile(filepath):
+                    raise FileNotFoundError("Исходный медиафайл отсутствует.")
+
+                if task.is_audio_only:
+                    await bot.send_audio(
+                        chat_id=task.chat_id, audio=FSInputFile(filepath),
+                        caption=f"🎵 {escape_markdown(title)}", parse_mode="Markdown"
+                    )
+                    await bot.delete_message(chat_id=task.chat_id, message_id=task.message_id)
+                    continue
+
+                wm_settings = await db_query(
+                    "SELECT text, position, color, font_size, opacity FROM watermark_settings WHERE user_id = ?",
+                    (task.user_id,), fetchone=True
+                ) or ("Media Hunter", "bottom_right", "white", 28, 0.8)
+                wm_settings = normalize_wm_settings(wm_settings)
+
+                out_file = os.path.join(tmp_dir, "processed.mp4")
+                await bot.edit_message_text(
+                    "🎨 Уникализация и водяной знак...",
+                    chat_id=task.chat_id, message_id=task.message_id
+                )
+                success = await process_video_ffmpeg(filepath, out_file, wm_settings)
+                final_send_path = out_file if success else filepath
+
+                if os.path.getsize(final_send_path) > MAX_RENDER_SIZE_MB * 1024 * 1024:
+                    raise ValueError(f"Результат больше лимита Telegram ({MAX_RENDER_SIZE_MB} МБ).")
+
+                await bot.send_video(
+                    chat_id=task.chat_id,
+                    video=FSInputFile(final_send_path),
+                    caption=f"✅ **Готово!**\n🎬 {escape_markdown(title)}",
+                    parse_mode="Markdown"
+                )
+                await bot.delete_message(chat_id=task.chat_id, message_id=task.message_id)
+
+                # Для каждого канала используем его собственный watermark.
+                active_channels = await db_query(
+                    """SELECT id, channel_id, wm_text, wm_position, wm_color, wm_font_size, wm_opacity
+                       FROM channels WHERE user_id = ? AND auto_post = 1""",
+                    (task.user_id,), fetchall=True
+                )
+                for ch in active_channels:
+                    ch_db_id, ch_id, *ch_wm = ch
+                    try:
+                        channel_file = final_send_path
+                        if ch_wm and tuple(ch_wm) != tuple(wm_settings):
+                            channel_file = os.path.join(tmp_dir, f"channel_{ch_db_id}.mp4")
+                            ch_success = await process_video_ffmpeg(
+                                filepath, channel_file, normalize_wm_settings(tuple(ch_wm))
+                            )
+                            if not ch_success:
+                                channel_file = final_send_path
+                        await bot.send_video(
+                            chat_id=ch_id,
+                            video=FSInputFile(channel_file),
+                            caption=f"🎬 {escape_markdown(title)}",
+                            parse_mode="Markdown"
+                        )
+                    except Exception as post_err:
+                        logger.error("Ошибка автопостинга в канал %s: %s", ch_id, post_err)
+
+        except Exception as e:
+            logger.exception("Ошибка выполнения задачи: %s", e)
+            try:
+                await bot.edit_message_text(
+                    "❌ Произошла ошибка обработки. Проверьте ссылку/размер файла и наличие FFmpeg.",
+                    chat_id=task.chat_id, message_id=task.message_id
+                )
+            except Exception:
+                pass
+        finally:
+            active_tasks_count = max(0, active_tasks_count - 1)
+            task_queue.task_done()
+
+async def main():
+    if BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
+        logger.critical("Укажите BOT_TOKEN в переменных окружения или файле!")
+        return
+
+    init_db()
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(router)
+
+    for worker_id in range(1, MAX_CONCURRENT_DOWNLOADS + 1):
+        asyncio.create_task(queue_worker(bot, worker_id))
+    logger.info("Media Hunter Bot успешно запущен!")
+    
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Бот остановлен.")
+  
