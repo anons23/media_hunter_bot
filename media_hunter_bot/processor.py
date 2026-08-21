@@ -17,6 +17,7 @@ from typing import Any, Callable
 from .config import (
     CLEANER_AGE_HOURS,
     COOKIES_PATH,
+    LOGO_DIR,
     MAX_WATERMARK_MB,
     MAX_WATERMARK_PX,
     MEDIA_DIR,
@@ -24,8 +25,33 @@ from .config import (
 
 logger = logging.getLogger(__name__)
 
-# ── helpers ─────────────────────────────────────────────────────────────────
+# ── font discovery ──────────────────────────────────────────────────────────
 
+_FONT_PATHS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+)
+
+
+def _find_font() -> str:
+    for p in _FONT_PATHS:
+        if os.path.exists(p):
+            return p
+    try:
+        proc = subprocess.run(
+            ["fc-match", "-f", "%{file}", "sans"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+# ── helpers ─────────────────────────────────────────────────────────────────
 
 def _run(cmd: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
     """Run a command, capture output, raise on non-zero after logging."""
@@ -42,7 +68,6 @@ def _run(cmd: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
 
 
 # ── cleanup ─────────────────────────────────────────────────────────────────
-
 
 def cleanup_media(age_hours: int, protected_paths: set[str]) -> None:
     """Remove files under MEDIA_DIR older than age_hours, skipping protected_paths."""
@@ -71,8 +96,24 @@ def cleanup_media(age_hours: int, protected_paths: set[str]) -> None:
                 pass
 
 
-# ── yt-dlp ──────────────────────────────────────────────────────────────────
+def cleanup_logos(age_hours: int, active_logos: set[str]) -> None:
+    """Remove old logo files from LOGO_DIR not in active_logos."""
+    if not LOGO_DIR.exists():
+        return
+    cutoff = time.time() - (age_hours * 3600)
+    for f in LOGO_DIR.iterdir():
+        if not f.is_file():
+            continue
+        if str(f) in active_logos:
+            continue
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+        except OSError:
+            pass
 
+
+# ── yt-dlp ──────────────────────────────────────────────────────────────────
 
 def playlist_items(url: str, max_items: int) -> list[str]:
     """Return a list of video URLs if *url* is a playlist, otherwise empty list."""
@@ -91,14 +132,13 @@ def playlist_items(url: str, max_items: int) -> list[str]:
     if proc.returncode != 0:
         return []
     lines = [line.strip() for line in proc.stdout.strip().splitlines() if line.strip()]
-    # If we got exactly one line and it matches the input URL, treat as single video
     if len(lines) == 1 and lines[0] == url:
         return []
     return lines
 
 
 def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> Path:
-    """Download best MP4 (<= 1080p to save RAM) into work_dir. Returns Path to file."""
+    """Download best MP4 (<= 1080p) into work_dir. Returns Path to file."""
     out_template = str(work_dir / "source.%(ext)s")
     cmd = [
         "yt-dlp",
@@ -131,11 +171,9 @@ def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> Path:
         err = stderr.decode("utf-8", "replace")[:800]
         raise RuntimeError(f"yt-dlp error: {err}")
 
-    # Find the downloaded file
     candidates = list(work_dir.glob("source.*"))
     if not candidates:
         raise RuntimeError("yt-dlp finished but no file found")
-    # Prefer mp4, otherwise take the largest file
     mp4s = [c for c in candidates if c.suffix.lower() == ".mp4"]
     if mp4s:
         return mp4s[0]
@@ -143,7 +181,6 @@ def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> Path:
 
 
 # ── ffprobe / metadata ──────────────────────────────────────────────────────
-
 
 def ffprobe(path: Path) -> tuple[dict[str, Any], int]:
     """Return (ffprobe JSON dict, file_size_bytes)."""
@@ -172,12 +209,10 @@ def metadata(path: Path) -> dict[str, str]:
         "title": tags.get("title") or tags.get("TITLE") or path.stem,
         "description": tags.get("description") or tags.get("DESCRIPTION") or "",
     }
-# ── ffmpeg processing ───────────────────────────────────────────────────────
 
 
 # ── color validation ────────────────────────────────────────────────────────
 
-# Whitelist: named colors ffmpeg understands + hex colors
 _VALID_COLOR_NAMES = frozenset({
     "white", "black", "red", "green", "blue", "yellow", "cyan", "magenta",
     "orange", "pink", "purple", "brown", "gray", "grey", "silver", "gold",
@@ -191,17 +226,18 @@ def _is_valid_color(color: str) -> bool:
     if c in _VALID_COLOR_NAMES:
         return True
     if c.startswith("#"):
-        # #RGB or #RRGGBB
         hex_part = c[1:]
         if len(hex_part) == 3 and all(ch in "0123456789abcdef" for ch in hex_part):
             return True
         if len(hex_part) == 6 and all(ch in "0123456789abcdef" for ch in hex_part):
             return True
     return False
+# ── ffmpeg watermark / processing ───────────────────────────────────────────
 
-
-def _build_watermark_filter(wm: dict[str, Any], width: int, height: int) -> str | None:
-    """Build ffmpeg drawtext/overlay filter string from watermark config."""
+def _build_watermark_filter(
+    wm: dict[str, Any], work_dir: Path
+) -> str | None:
+    """Build ffmpeg filter string. Uses textfile for drawtext safety."""
     wtype = wm.get("type")
     if wtype == "text":
         text = wm.get("text", "")
@@ -213,22 +249,26 @@ def _build_watermark_filter(wm: dict[str, Any], width: int, height: int) -> str 
         color = raw_color if _is_valid_color(raw_color) else "white"
         opacity = float(wm.get("opacity", 0.8))
 
-        # Position mapping
         positions = {
             "tl": "x=10:y=10",
-            "tr": f"x=w-text_w-10:y=10",
-            "bl": f"x=10:y=h-text_h-10",
-            "br": f"x=w-text_w-10:y=h-text_h-10",
-            "c":  f"x=(w-text_w)/2:y=(h-text_h)/2",
+            "tr": "x=w-text_w-10:y=10",
+            "bl": "x=10:y=h-text_h-10",
+            "br": "x=w-text_w-10:y=h-text_h-10",
+            "c":  "x=(w-text_w)/2:y=(h-text_h)/2",
         }
         pos_str = positions.get(pos, positions["br"])
 
-        # Escape colons and single quotes for drawtext
-        safe_text = text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+        font = _find_font()
+        fontfile_opt = f":fontfile='{font}'" if font else ""
+
+        # Write text to file — avoids escaping hell in filter expression
+        textfile = work_dir / "wm_text.txt"
+        textfile.write_text(text, encoding="utf-8")
+
         return (
-            f"drawtext=text='{safe_text}':{pos_str}:"
-            f"fontsize={size}:fontcolor={color}@alpha={opacity:.2f}:"
-            f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+            f"drawtext=textfile='{textfile}':{pos_str}:"
+            f"fontsize={size}:fontcolor={color}@alpha={opacity:.2f}"
+            f"{fontfile_opt}"
         )
     elif wtype == "image":
         logo_path = wm.get("logo", "")
@@ -243,7 +283,9 @@ def _build_watermark_filter(wm: dict[str, Any], width: int, height: int) -> str 
             "c":  "x=(W-w)/2:y=(H-h)/2",
         }
         pos_str = positions.get(pos, positions["br"])
-        return f"movie={logo_path}[logo];[in][logo]overlay={pos_str}[out]"
+        # Escape path for ffmpeg filter
+        safe_logo = logo_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+        return f"movie='{safe_logo}'[logo];[in][logo]overlay={pos_str}[out]"
     return None
 
 
@@ -255,7 +297,7 @@ def process_media(
     compress: bool,
     register: Callable[[Any], None],
 ) -> Path:
-    """Process source media: extract audio, compress, add watermark. Returns output Path."""
+    """Process source media. Returns output Path."""
     if audio_only:
         output = work_dir / "output.mp3"
         cmd = [
@@ -266,24 +308,20 @@ def process_media(
         ]
     else:
         output = work_dir / "output.mp4"
-        # Base command
         cmd = [
             "ffmpeg", "-y", "-i", str(source),
             "-c:v", "libx264",
-            "-preset", "fast",
             "-threads", "1",
             "-c:a", "aac", "-b:a", "128k",
             "-movflags", "+faststart",
         ]
 
         if compress:
-            # More aggressive compression for large files
             cmd.extend(["-crf", "28", "-preset", "fast"])
         else:
             cmd.extend(["-crf", "23", "-preset", "medium"])
 
-        # Watermark
-        filter_str = _build_watermark_filter(watermark, 0, 0)
+        filter_str = _build_watermark_filter(watermark, work_dir)
         if filter_str:
             cmd.extend(["-vf", filter_str])
 
@@ -314,9 +352,8 @@ def process_media(
 
 # ── logo validation ─────────────────────────────────────────────────────────
 
-
 def validate_logo(path: Path) -> tuple[bool, str]:
-    """Check logo file size and dimensions. Returns (ok, error_message)."""
+    """Check logo file size and dimensions."""
     try:
         size = path.stat().st_size
     except OSError as e:
@@ -325,7 +362,6 @@ def validate_logo(path: Path) -> tuple[bool, str]:
     if size > MAX_WATERMARK_MB * 1024 * 1024:
         return False, f"Logo too large ({size // 1024 // 1024} MB, max {MAX_WATERMARK_MB} MB)"
 
-    # Use ffprobe to get width/height
     cmd = [
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
