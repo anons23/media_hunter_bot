@@ -1,0 +1,60 @@
+name: Apply v3 fixes
+on:
+  push:
+    paths:
+      - .github/workflows/_apply_v3_fixes.yml
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: github.ref == 'refs/heads/Media_hanter-v3'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: Media_hanter-v3
+          fetch-depth: 0
+      - name: Apply exactly requested fixes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('media_hunter_bot/processor.py')
+          s = p.read_text()
+          old = '''logger = logging.getLogger(__name__)\n\n# ── helpers'''
+          new = '''logger = logging.getLogger(__name__)\n\n_VALID_COLOR_NAMES = frozenset({\n    "white", "black", "red", "green", "blue", "yellow", "cyan", "magenta",\n    "orange", "pink", "purple", "brown", "gray", "grey", "silver", "gold",\n    "lime", "navy", "teal", "olive", "maroon", "violet", "indigo", "turquoise",\n})\n\ndef _is_valid_color(color: str) -> bool:\n    c = color.lower().strip()\n    if c in _VALID_COLOR_NAMES:\n        return True\n    if c.startswith("#"):\n        hex_part = c[1:]\n        if len(hex_part) == 3 and all(ch in "0123456789abcdef" for ch in hex_part):\n            return True\n        if len(hex_part) == 6 and all(ch in "0123456789abcdef" for ch in hex_part):\n            return True\n    return False\n\n\n# ── helpers'''
+          assert s.count(old) == 1
+          s = s.replace(old, new)
+          old = '''        color = wm.get("color", "white")\n        opacity = float(wm.get("opacity", 0.8))'''
+          new = '''        raw_color = wm.get("color", "white")\n        color = raw_color if _is_valid_color(raw_color) else "white"\n        opacity = float(wm.get("opacity", 0.8))'''
+          assert s.count(old) == 1
+          s = s.replace(old, new)
+          p.write_text(s)
+
+          p = Path('media_hunter_bot/handlers.py')
+          s = p.read_text()
+          old = '''from .processor import (\n    cleanup_media,\n    download,'''
+          new = '''from .processor import (\n    _is_valid_color,\n    cleanup_media,\n    download,'''
+          assert s.count(old) == 1
+          s = s.replace(old, new)
+          old = '''        if not color or len(color) > 32:\n            raise ValueError'''
+          new = '''        if not color or len(color) > 32 or not _is_valid_color(color):\n            raise ValueError'''
+          assert s.count(old) == 1
+          s = s.replace(old, new)
+          old = '''                        cr_size = (await asyncio.to_thread(cr.stat)).st_size\n                        if cr_size > limit:\n                            raise RuntimeError(\n                                f"канальное видео превышает лимит {MAX_URL_LOGICAL_MB} МБ"\n                            )'''
+          new = '''                        cr_size = (await asyncio.to_thread(cr.stat)).st_size\n\n                        # 2nd pass: channel watermark bloated the file\n                        if not oversized and cr_size > limit:\n                            cr = await process_media(\n                                source,\n                                work,\n                                await db.aget_channel_watermark(ch["channel_id"], j.uid),\n                                audio_only=False,\n                                compress=True,\n                                register=register,\n                            )\n                            cr_size = (await asyncio.to_thread(cr.stat)).st_size\n\n                        if cr_size > limit:\n                            raise RuntimeError(\n                                f"канальное видео превышает лимит {MAX_URL_LOGICAL_MB} МБ"\n                            )'''
+          assert s.count(old) == 1
+          s = s.replace(old, new)
+          p.write_text(s)
+          PY
+      - name: Verify exact changes
+        run: |
+          python -m py_compile media_hunter_bot/processor.py media_hunter_bot/handlers.py
+          git diff --check
+      - name: Commit fixes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add media_hunter_bot/processor.py media_hunter_bot/handlers.py
+          git diff --cached --quiet && exit 0
+          git commit -m "Fix watermark color validation and channel compression"
+          git push origin Media_hanter-v3
