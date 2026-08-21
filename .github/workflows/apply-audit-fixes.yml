@@ -1,0 +1,64 @@
+name: Apply v3 audit fixes
+on:
+  push:
+    branches: [Media_hanter-v3]
+permissions:
+  contents: write
+jobs:
+  fix:
+    if: "!contains(github.event.head_commit.message, '[audit-fix]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: Media_hanter-v3
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Patch and validate
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path('media_hunter_bot/handlers.py')
+          s = p.read_text(encoding='utf-8')
+
+          # Fix the broken/de-duplicated channel delete callback.
+          pattern = re.compile(
+              r'@router\.callback_query\(F\.data\.startswith\("del:"\)\)\s*'
+              r'async def dele\(c: CallbackQuery\):.*?(?=\n@router\.|\n# ═|\Z)',
+              re.S,
+          )
+          replacement = '''@router.callback_query(F.data.startswith("del:"))
+          async def dele(c: CallbackQuery):
+              await db.aremove_channel(c.from_user.id, int(c.data.split(":", 1)[1]))
+              await c.answer("Удалено")
+              await channels(c)
+          '''
+          s2, n = pattern.subn(replacement, s, count=1)
+          if n:
+              s = s2
+
+          # Cleaner must preserve logo files referenced by users/channels.
+          old = 'await asyncio.to_thread(cleanup_logos, CLEANER_AGE_HOURS * 7, set())'
+          new = '''active_logos = await db.aactive_logo_paths()
+              await asyncio.to_thread(cleanup_logos, CLEANER_AGE_HOURS * 7, active_logos)'''
+          if old in s:
+              s = s.replace(old, new, 1)
+
+          p.write_text(s, encoding='utf-8')
+          print('handlers patched:', n)
+          PY
+          python -m py_compile media_hunter_bot/processor.py media_hunter_bot/handlers.py media_hunter_bot/db.py media_hunter_bot/config.py main.py
+      - name: Commit fixes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add media_hunter_bot/handlers.py
+          if git diff --cached --quiet; then
+            echo 'No changes required'
+            exit 0
+          fi
+          git commit -m 'fix(v3): apply audit fixes [audit-fix]'
+          git push origin HEAD:Media_hanter-v3
