@@ -16,7 +16,10 @@ from typing import Any
 from .config import ADMIN_ID, DB_PATH
 
 
+# ── helpers ─────────────────────────────────────────────────────────────────
+
 def _now() -> str:
+    """UTC ISO-8601 with explicit +00:00."""
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -32,6 +35,8 @@ def _parse_premium_until(raw: str | None) -> datetime | None:
     return dt
 
 
+# ── connection ──────────────────────────────────────────────────────────────
+
 @contextmanager
 def _db():
     con = sqlite3.connect(DB_PATH, timeout=30)
@@ -45,6 +50,8 @@ def _db():
     finally:
         con.close()
 
+
+# ── schema ──────────────────────────────────────────────────────────────────
 
 _INIT_SQL = """
 CREATE TABLE IF NOT EXISTS users(
@@ -105,46 +112,78 @@ _DEFAULT_SETTINGS = {
 def init_db() -> None:
     with _db() as c:
         c.executescript(_INIT_SQL)
+
         for k, v in _DEFAULT_SETTINGS.items():
-            c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
+            c.execute(
+                "INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v)
+            )
+
         for slot in (1, 2, 3):
             c.execute("INSERT OR IGNORE INTO opp(slot) VALUES(?)", (slot,))
+
         _ensure_user_locked(c, ADMIN_ID, None, None)
-        c.execute("UPDATE users SET permanent_premium=1 WHERE user_id=?", (ADMIN_ID,))
+        c.execute(
+            "UPDATE users SET permanent_premium=1 WHERE user_id=?", (ADMIN_ID,)
+        )
 
 
-def _ensure_user_locked(c: sqlite3.Connection, user_id: int, username: str | None, first_name: str | None) -> None:
+# ── users ───────────────────────────────────────────────────────────────────
+
+def _ensure_user_locked(
+    c: sqlite3.Connection,
+    user_id: int,
+    username: str | None,
+    first_name: str | None,
+) -> None:
     username = username or None
     first_name = first_name or None
     t = _now()
-    c.execute("INSERT OR IGNORE INTO users(user_id,username,first_name,created_at,updated_at) VALUES(?,?,?,?,?)", (user_id, username, first_name, t, t))
-    c.execute("UPDATE users SET username=COALESCE(?,username), first_name=COALESCE(?,first_name), updated_at=? WHERE user_id=?", (username, first_name, t, user_id))
+    c.execute(
+        "INSERT OR IGNORE INTO users(user_id,username,first_name,created_at,updated_at) VALUES(?,?,?,?,?)",
+        (user_id, username, first_name, t, t),
+    )
+    c.execute(
+        "UPDATE users SET username=COALESCE(?,username), first_name=COALESCE(?,first_name), updated_at=? WHERE user_id=?",
+        (username, first_name, t, user_id),
+    )
 
 
-def ensure_user(user_id: int, username: str | None = None, first_name: str | None = None) -> None:
+def ensure_user(
+    user_id: int, username: str | None = None, first_name: str | None = None
+) -> None:
     with _db() as c:
         _ensure_user_locked(c, user_id, username, first_name)
 
 
 def get_user(user_id: int) -> sqlite3.Row | None:
     with _db() as c:
-        return c.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
+        return c.execute(
+            "SELECT * FROM users WHERE user_id=?", (user_id,)
+        ).fetchone()
 
 
 def set_format(user_id: int, fmt: str) -> None:
     with _db() as c:
-        c.execute("UPDATE users SET format=?,updated_at=? WHERE user_id=?", (fmt, _now(), user_id))
+        c.execute(
+            "UPDATE users SET format=?,updated_at=? WHERE user_id=?",
+            (fmt, _now(), user_id),
+        )
 
 
 def get_user_watermark(user_id: int) -> dict[str, Any]:
     with _db() as c:
-        r = c.execute("SELECT watermark FROM users WHERE user_id=?", (user_id,)).fetchone()
+        r = c.execute(
+            "SELECT watermark FROM users WHERE user_id=?", (user_id,)
+        ).fetchone()
         return json.loads(r[0] or "{}") if r else {}
 
 
 def set_user_watermark(user_id: int, value: dict[str, Any]) -> None:
     with _db() as c:
-        c.execute("UPDATE users SET watermark=?,updated_at=? WHERE user_id=?", (json.dumps(value, ensure_ascii=False), _now(), user_id))
+        c.execute(
+            "UPDATE users SET watermark=?,updated_at=? WHERE user_id=?",
+            (json.dumps(value, ensure_ascii=False), _now(), user_id),
+        )
 
 
 def is_premium(user_id: int) -> bool:
@@ -161,15 +200,207 @@ def is_premium(user_id: int) -> bool:
 
 def extend_premium(user_id: int, days: int) -> None:
     with _db() as c:
-        u = c.execute("SELECT premium_until,permanent_premium FROM users WHERE user_id=?", (user_id,)).fetchone()
+        u = c.execute(
+            "SELECT premium_until,permanent_premium FROM users WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
         if not u or u["permanent_premium"]:
             return
         base = datetime.now(timezone.utc)
         old = _parse_premium_until(u["premium_until"])
         if old is not None:
             base = max(base, old)
-        c.execute("UPDATE users SET premium_until=?,updated_at=? WHERE user_id=?", ((base + timedelta(days=days)).isoformat(), _now(), user_id))
+        c.execute(
+            "UPDATE users SET premium_until=?,updated_at=? WHERE user_id=?",
+            ((base + timedelta(days=days)).isoformat(), _now(), user_id),
+        )
 
 
-# The remainder of the database module is intentionally preserved from the existing v3 branch.
-# Async wrappers and channel/OPP/settings/payment functions follow unchanged.
+# ── channels ────────────────────────────────────────────────────────────────
+
+def list_channels(user_id: int) -> list[sqlite3.Row]:
+    with _db() as c:
+        return c.execute(
+            "SELECT * FROM channels WHERE user_id=? ORDER BY id", (user_id,)
+        ).fetchall()
+
+
+def add_channel(user_id: int, channel_id: int, title: str) -> None:
+    with _db() as c:
+        count = c.execute(
+            "SELECT COUNT(*) FROM channels WHERE user_id=?", (user_id,)
+        ).fetchone()[0]
+        if count >= 3:
+            raise ValueError("maximum 3 channels")
+        c.execute(
+            "INSERT INTO channels(user_id,channel_id,title,created_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(user_id,channel_id) DO UPDATE SET title=excluded.title",
+            (user_id, channel_id, title, _now()),
+        )
+
+
+def remove_channel(user_id: int, channel_id: int) -> None:
+    with _db() as c:
+        c.execute(
+            "DELETE FROM channels WHERE user_id=? AND channel_id=?",
+            (user_id, channel_id),
+        )
+
+
+def set_channel_enabled(user_id: int, channel_id: int, enabled: bool) -> None:
+    with _db() as c:
+        c.execute(
+            "UPDATE channels SET enabled=? WHERE user_id=? AND channel_id=?",
+            (int(enabled), user_id, channel_id),
+        )
+
+
+def get_channel_watermark(channel_id: int, user_id: int) -> dict[str, Any]:
+    with _db() as c:
+        r = c.execute(
+            "SELECT watermark FROM channels WHERE channel_id=? AND user_id=?",
+            (channel_id, user_id),
+        ).fetchone()
+        return json.loads(r[0] or "{}") if r else {}
+
+
+def set_channel_watermark(
+    channel_id: int, user_id: int, value: dict[str, Any]
+) -> None:
+    with _db() as c:
+        c.execute(
+            "UPDATE channels SET watermark=? WHERE channel_id=? AND user_id=?",
+            (json.dumps(value, ensure_ascii=False), channel_id, user_id),
+        )
+
+
+# ── settings / opp / payments ───────────────────────────────────────────────
+
+def get_setting(key: str, default: str = "") -> str:
+    with _db() as c:
+        r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return r[0] if r else default
+
+
+def set_setting(key: str, value: str) -> None:
+    with _db() as c:
+        c.execute(
+            "INSERT INTO settings(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+
+
+def get_opp() -> list[sqlite3.Row]:
+    with _db() as c:
+        return c.execute("SELECT * FROM opp ORDER BY slot").fetchall()
+
+
+def set_opp(slot: int, enabled: bool, title: str, url: str) -> None:
+    with _db() as c:
+        c.execute(
+            "UPDATE opp SET enabled=?,title=?,url=? WHERE slot=?",
+            (int(enabled), title, url, slot),
+        )
+
+
+def active_opp() -> list[sqlite3.Row]:
+    return [r for r in get_opp() if r["enabled"] and r["url"]]
+
+
+def save_payment(
+    user_id: int, payload: str, days: int, stars: int, charge_id: str
+) -> bool:
+    with _db() as c:
+        c.execute(
+            "INSERT OR IGNORE INTO payments(user_id,payload,days,stars,telegram_charge_id,created_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (user_id, payload, days, stars, charge_id, _now()),
+        )
+        return c.total_changes > 0
+
+
+# ── async wrappers (thread-pool offload) ────────────────────────────────────
+
+async def aensure_user(
+    user_id: int, username: str | None = None, first_name: str | None = None
+):
+    return await asyncio.to_thread(ensure_user, user_id, username, first_name)
+
+
+async def aget_user(user_id: int):
+    return await asyncio.to_thread(get_user, user_id)
+
+
+async def aset_format(user_id: int, fmt: str):
+    return await asyncio.to_thread(set_format, user_id, fmt)
+
+
+async def aget_user_watermark(user_id: int) -> dict[str, Any]:
+    return await asyncio.to_thread(get_user_watermark, user_id)
+
+
+async def aset_user_watermark(user_id: int, value: dict[str, Any]):
+    return await asyncio.to_thread(set_user_watermark, user_id, value)
+
+
+async def ais_premium(user_id: int) -> bool:
+    return await asyncio.to_thread(is_premium, user_id)
+
+
+async def aextend_premium(user_id: int, days: int):
+    return await asyncio.to_thread(extend_premium, user_id, days)
+
+
+async def alist_channels(user_id: int):
+    return await asyncio.to_thread(list_channels, user_id)
+
+
+async def aadd_channel(user_id: int, channel_id: int, title: str):
+    return await asyncio.to_thread(add_channel, user_id, channel_id, title)
+
+
+async def aremove_channel(user_id: int, channel_id: int):
+    return await asyncio.to_thread(remove_channel, user_id, channel_id)
+
+
+async def aset_channel_enabled(user_id: int, channel_id: int, enabled: bool):
+    return await asyncio.to_thread(set_channel_enabled, user_id, channel_id, enabled)
+
+
+async def aget_channel_watermark(channel_id: int, user_id: int) -> dict[str, Any]:
+    return await asyncio.to_thread(get_channel_watermark, channel_id, user_id)
+
+
+async def aset_channel_watermark(
+    channel_id: int, user_id: int, value: dict[str, Any]
+):
+    return await asyncio.to_thread(set_channel_watermark, channel_id, user_id, value)
+
+
+async def aget_setting(key: str, default: str = "") -> str:
+    return await asyncio.to_thread(get_setting, key, default)
+
+
+async def aset_setting(key: str, value: str):
+    return await asyncio.to_thread(set_setting, key, value)
+
+
+async def aget_opp():
+    return await asyncio.to_thread(get_opp)
+
+
+async def aset_opp(slot: int, enabled: bool, title: str, url: str):
+    return await asyncio.to_thread(set_opp, slot, enabled, title, url)
+
+
+async def aactive_opp():
+    return await asyncio.to_thread(active_opp)
+
+
+async def asave_payment(
+    user_id: int, payload: str, days: int, stars: int, charge_id: str
+) -> bool:
+    return await asyncio.to_thread(
+        save_payment, user_id, payload, days, stars, charge_id
+    )
