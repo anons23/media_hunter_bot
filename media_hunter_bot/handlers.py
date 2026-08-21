@@ -197,6 +197,9 @@ async def opp_check(bot: Bot, uid: int) -> tuple[bool, list[list[InlineKeyboardB
                 )
             except Exception:
                 ok = False
+        if target is None:
+            logger.warning("OPP slot %s uses a private invite link; membership cannot be verified", r["slot"])
+            continue
         if not ok:
             missing = True
             rows.append([B(r["title"] or f'ОПП {r["slot"]}', url=r["url"])])
@@ -282,23 +285,6 @@ class Engine:
 
     async def restart(self, uid: int):
         self.gen[uid] = self.gen.get(uid, 0) + 1
-        # Drain queued jobs for this user to free queue slots
-        drained = 0
-        temp = []
-        while not self.q.empty():
-            try:
-                j = self.q.get_nowait()
-                if j.uid == uid:
-                    drained += 1
-                else:
-                    temp.append(j)
-            except asyncio.QueueEmpty:
-                break
-        for j in temp:
-            await self.q.put(j)
-        async with self._lock:
-            self._queue_size = max(0, self._queue_size - drained)
-        # Cancel running tasks
         tasks = list(self.tasks.get(uid, set()))
         for t in tasks:
             if not t.done():
@@ -306,7 +292,7 @@ class Engine:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.tasks.pop(uid, None)
-        # Kill subprocesses
+
         with self._proc_lock:
             procs = list(self.processes.get(uid, set()))
             self.processes.pop(uid, None)
@@ -315,14 +301,12 @@ class Engine:
                 if p.returncode is None:
                     p.terminate()
                     try:
-                        await asyncio.wait_for(
-                            asyncio.to_thread(p.wait), timeout=5
-                        )
+                        await asyncio.wait_for(asyncio.to_thread(p.wait), timeout=5)
                     except asyncio.TimeoutError:
                         p.kill()
             except Exception:
                 pass
-        # Clean upload dirs
+
         for root in list(self.uploads.pop(uid, set())):
             await asyncio.to_thread(shutil.rmtree, root, ignore_errors=True)
 
@@ -369,18 +353,27 @@ class Engine:
             if j.url:
                 items = await asyncio.to_thread(playlist_items, j.url, MAX_PLAYLIST_ITEMS)
                 if len(items) > 1:
-                    for u in items:
-                        await self.add(j.uid, url=u)
+                    premium = await db.ais_premium(j.uid)
+                    async with self._lock:
+                        free = self._max_queue - self._queue_size
+                        if len(items) > free:
+                            raise RuntimeError(
+                                f"Плейлист содержит {len(items)} видео, но свободно только {free} мест в очереди."
+                            )
+                        jobs = []
+                        for u in items:
+                            self.seq += 1
+                            self._queue_size += 1
+                            jobs.append(Job(0 if premium else 1, self.seq, j.uid, self.gen.get(j.uid, 0), u, None))
+                        for job in jobs:
+                            await self.q.put(job)
                     await self.bot.send_message(
                         j.uid,
                         f"📚 Плейлист: {len(items)} видео добавлено в очередь.",
                     )
                     return
-                if not items:
-                    raise RuntimeError(
-                        "Плейлист или ссылка не содержит доступного видео"
-                    )
-                source = await asyncio.to_thread(download, j.url, work, register)
+                source_url = items[0] if len(items) == 1 else j.url
+                source = await asyncio.to_thread(download, source_url, work, register)
             else:
                 source = j.source
 
@@ -528,8 +521,9 @@ class Engine:
                 await asyncio.to_thread(
                     cleanup_media, CLEANER_AGE_HOURS, self.active_paths()
                 )
+                active_logos = await db.aactive_logo_paths()
                 await asyncio.to_thread(
-                    cleanup_logos, CLEANER_AGE_HOURS * 7, set()
+                    cleanup_logos, CLEANER_AGE_HOURS * 7, active_logos
                 )
             except asyncio.CancelledError:
                 raise
@@ -574,6 +568,14 @@ async def start(m: Message, bot: Bot):
     await db.aensure_user(
         m.from_user.id, m.from_user.username, m.from_user.first_name
     )
+    if m.text:
+        parts = m.text.split(maxsplit=1)
+        if len(parts) == 2 and parts[1].startswith("ref_"):
+            try:
+                referrer_id = int(parts[1][4:])
+                await db.aapply_referral(m.from_user.id, referrer_id)
+            except ValueError:
+                pass
     missing, rows = await opp_check(bot, m.from_user.id)
     if missing:
         await m.answer(
@@ -640,9 +642,10 @@ async def premium(c: CallbackQuery):
 
 @router.callback_query(F.data == "stars")
 async def stars(c: CallbackQuery):
-    url = await db.aget_setting(
-        "stars_link", "https://t.me/starslly_bot?start=489552258"
-    )
+    url = await db.aget_setting("stars_link", "")
+    if not url:
+        await c.answer("Партнёрская ссылка Stars пока не настроена.", show_alert=True)
+        return
     await c.answer()
     await c.message.edit_text(
         "💎 Если не хватает Stars, купите их у партнёра:",
@@ -662,6 +665,10 @@ async def buy(c: CallbackQuery, bot: Bot):
         price = PREMIUM_PLANS[days]
     except (ValueError, KeyError):
         await c.answer("Некорректный тариф", show_alert=True)
+        return
+    user = await db.aget_user(c.from_user.id)
+    if user and user["permanent_premium"]:
+        await c.answer("У вас уже постоянный Premium.", show_alert=True)
         return
     payload = f"premium:{days}:{c.from_user.id}:{secrets.token_hex(8)}"
     await c.answer()
@@ -930,7 +937,6 @@ async def toggle(c: CallbackQuery):
 
 @router.callback_query(F.data.startswith("del:"))
 async def dele(c: CallbackQuery):
-    await db.aremove_channel(c.from_user.id, int(c.data.split(":", 1)
     await db.aremove_channel(c.from_user.id, int(c.data.split(":", 1)[1]))
     await c.answer("Удалено")
     await channels(c)
@@ -1226,12 +1232,32 @@ async def aytdlp(c: CallbackQuery):
 async def abot(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
         return
+    await c.answer()
+    await c.message.edit_text("Перезапустить бота?", reply_markup=kb([
+        [B("✅ Подтвердить", "abot:yes"), B("❌ Отмена", "admin")]
+    ]))
+
+
+@router.callback_query(F.data == "abot:yes")
+async def abot_yes(c: CallbackQuery):
+    if c.from_user.id != ADMIN_ID:
+        return
     await c.answer("Бот перезапускается")
     asyncio.create_task(_exit_later())
 
 
 @router.callback_query(F.data == "areboot")
 async def areboot(c: CallbackQuery):
+    if c.from_user.id != ADMIN_ID:
+        return
+    await c.answer()
+    await c.message.edit_text("Перезагрузить VPS?", reply_markup=kb([
+        [B("⚠️ Перезагрузить", "areboot:yes"), B("❌ Отмена", "admin")]
+    ]))
+
+
+@router.callback_query(F.data == "areboot:yes")
+async def areboot_yes(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
         return
     await c.answer("VPS перезагружается", show_alert=True)
@@ -1244,6 +1270,8 @@ async def areboot(c: CallbackQuery):
 
 async def _exit_later():
     await asyncio.sleep(1)
+    if os.name == "nt":
+        os._exit(0)
     os.kill(os.getpid(), signal.SIGTERM)
 
 
@@ -1279,8 +1307,12 @@ async def main():
     )
     db.init_db()
 
-    session = AiohttpSession(api=TelegramAPIServer.from_base(LOCAL_BOT_API))
-    bot = Bot(BOT_TOKEN, session=session)
+    if LOCAL_BOT_API:
+        session = AiohttpSession(api=TelegramAPIServer.from_base(LOCAL_BOT_API))
+        bot = Bot(BOT_TOKEN, session=session)
+    else:
+        session = None
+        bot = Bot(BOT_TOKEN)
     dp = Dispatcher()
     engine = Engine(bot)
     dp["engine"] = engine
@@ -1308,5 +1340,8 @@ async def main():
         pass
     finally:
         await engine.shutdown()
-        await bot.session.close()
+        if session is not None:
+            await session.close()
+        else:
+            await bot.session.close()
         logger.info("Bot stopped cleanly.")
