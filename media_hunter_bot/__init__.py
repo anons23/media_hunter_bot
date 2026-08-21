@@ -1,3 +1,3 @@
-"""Media Hunter Bot — Telegram бот для скачивания и обработки медиа."""
+"""Media Hunter Bot — Telegram bot for downloading and processing media."""
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
