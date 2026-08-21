@@ -22,13 +22,13 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 LOCAL_BOT_API = os.getenv("LOCAL_BOT_API", "http://127.0.0.1:8081")
 
 # ── Limits ──────────────────────────────────────────────────────────────────
-MAX_URL_LOGICAL_MB = int(os.getenv("MAX_URL_LOGICAL_MB", "80"))
-MAX_USER_UPLOAD_MB = int(os.getenv("MAX_USER_UPLOAD_MB", "80"))
+MAX_URL_LOGICAL_MB = int(os.getenv("MAX_URL_LOGICAL_MB", "49"))
+MAX_USER_UPLOAD_MB = int(os.getenv("MAX_USER_UPLOAD_MB", "49"))
 MAX_WATERMARK_MB = int(os.getenv("MAX_WATERMARK_MB", "5"))
 MAX_WATERMARK_PX = int(os.getenv("MAX_WATERMARK_PX", "2000"))
 
 # ── Engine tuning (optimised for 1 vCPU / 4 GB RAM) ─────────────────────────
-MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "2"))          # ffmpeg/yt-dlp workers
+MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "2"))
 MAX_PLAYLIST_ITEMS = int(os.getenv("MAX_PLAYLIST_ITEMS", "50"))
 CLEANER_AGE_HOURS = int(os.getenv("CLEANER_AGE_HOURS", "12"))
 MAX_QUEUE_SIZE = int(os.getenv("MAX_QUEUE_SIZE", "100"))
