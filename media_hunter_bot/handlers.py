@@ -54,6 +54,7 @@ from .config import (
 )
 from . import db
 from .processor import (
+    _is_valid_color,
     cleanup_media,
     download,
     ffprobe,
@@ -255,7 +256,6 @@ class Engine:
                 source,
             )
         )
-
     def register(self, uid: int, proc):
         if proc is None:
             for p in list(self.processes.get(uid, set())):
@@ -419,6 +419,17 @@ class Engine:
                             register=register,
                         )
                         cr_size = (await asyncio.to_thread(cr.stat)).st_size
+                        # 2nd pass: channel watermark bloated the file
+                        if not oversized and cr_size > limit:
+                            cr = await process_media(
+                                source,
+                                work,
+                                await db.aget_channel_watermark(ch["channel_id"], j.uid),
+                                audio_only=False,
+                                compress=True,
+                                register=register,
+                            )
+                            cr_size = (await asyncio.to_thread(cr.stat)).st_size
                         if cr_size > limit:
                             raise RuntimeError(
                                 f"канальное видео превышает лимит {MAX_URL_LOGICAL_MB} МБ"
@@ -499,11 +510,10 @@ class Engine:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.workers.clear()
         self.cleaner_task = None
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  User handlers
 # ═══════════════════════════════════════════════════════════════════════════════
+
 @router.message(CommandStart())
 async def start(m: Message, bot: Bot):
     await db.aensure_user(
@@ -822,8 +832,6 @@ async def addch_value(m: Message, state: FSMContext, bot: Bot):
         await m.answer(f"❌ {e}")
     except Exception as e:
         await m.answer("❌ Не удалось добавить канал: " + str(e)[:250])
-
-
 @router.callback_query(F.data.startswith("ch:"))
 async def ch(c: CallbackQuery):
     cid = int(c.data.split(":", 1)[1])
@@ -875,6 +883,8 @@ async def dele(c: CallbackQuery):
     await db.aremove_channel(c.from_user.id, int(c.data.split(":", 1)[1]))
     await c.answer("Удалено")
     await channels(c)
+
+
 @router.callback_query(F.data == "wm")
 async def wm(c: CallbackQuery):
     await c.answer()
@@ -936,9 +946,8 @@ async def wmvalue(m: Message, state: FSMContext):
             position not in {"tl", "tr", "bl", "br", "c"}
             or not 10 <= size <= 200
             or not 0.05 <= opacity <= 1
+            or not _is_valid_color(color)
         ):
-            raise ValueError
-        if not color or len(color) > 32:
             raise ValueError
     except ValueError:
         await m.answer(
