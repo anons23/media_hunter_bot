@@ -195,9 +195,25 @@ def list_channels(user_id: int) -> list[sqlite3.Row]:
 
 def add_channel(user_id: int, channel_id: int, title: str) -> None:
     with _db() as c:
+        existing = c.execute("SELECT id FROM channels WHERE user_id=? AND channel_id=?", (user_id, channel_id)).fetchone()
+        if existing:
+            c.execute("UPDATE channels SET title=? WHERE user_id=? AND channel_id=?", (title, user_id, channel_id))
+            return
+        premium_row = c.execute("SELECT premium_until, permanent_premium FROM users WHERE user_id=?", (user_id,)).fetchone()
+        premium = False
+        if premium_row:
+            if premium_row["permanent_premium"]:
+                premium = True
+            else:
+                until = _parse_premium_until(premium_row["premium_until"])
+                premium = until is not None and datetime.now(timezone.utc) < until
+        max_channels = 3 if premium else 1
         count = c.execute("SELECT COUNT(*) FROM channels WHERE user_id=?", (user_id,)).fetchone()[0]
-        if count >= 3: raise ValueError("maximum 3 channels")
-        c.execute("INSERT INTO channels(user_id,channel_id,title,created_at) VALUES(?,?,?,?) ON CONFLICT(user_id,channel_id) DO UPDATE SET title=excluded.title", (user_id, channel_id, title, _now()))
+        if count >= max_channels:
+            if premium:
+                raise ValueError("Максимум 3 канала для Premium")
+            raise ValueError("Для бесплатного тарифа доступен только 1 канал. Подключите Premium для 3 каналов.")
+        c.execute("INSERT INTO channels(user_id,channel_id,title,created_at) VALUES(?,?,?,?)", (user_id, channel_id, title, _now()))
 
 
 def remove_channel(user_id: int, channel_id: int) -> None:
