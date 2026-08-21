@@ -90,25 +90,15 @@ CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id);
 CREATE INDEX IF NOT EXISTS idx_users_premium ON users(premium_until);
 """
 
-_DEFAULT_SETTINGS = {
-    "stars_link": "",
-    "ad_text": "",
-    "ad_button": "",
-    "ad_url": "",
-}
+_DEFAULT_SETTINGS = {"stars_link": "", "ad_text": "", "ad_button": "", "ad_url": ""}
 
 
 def init_db() -> None:
     ensure_directories()
     with _db() as c:
         c.executescript(_INIT_SQL)
-        # Migrate old databases safely before adding the unique charge index.
-        c.execute(
-            "DELETE FROM payments WHERE id NOT IN (SELECT MIN(id) FROM payments WHERE telegram_charge_id IS NOT NULL GROUP BY telegram_charge_id) AND telegram_charge_id IS NOT NULL"
-        )
-        c.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_telegram_charge_id ON payments(telegram_charge_id) WHERE telegram_charge_id IS NOT NULL"
-        )
+        c.execute("DELETE FROM payments WHERE id NOT IN (SELECT MIN(id) FROM payments WHERE telegram_charge_id IS NOT NULL GROUP BY telegram_charge_id) AND telegram_charge_id IS NOT NULL")
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_telegram_charge_id ON payments(telegram_charge_id) WHERE telegram_charge_id IS NOT NULL")
         for k, v in _DEFAULT_SETTINGS.items():
             c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
         for slot in (1, 2, 3):
@@ -130,14 +120,46 @@ def ensure_user(user_id: int, username: str | None = None, first_name: str | Non
         _ensure_user_locked(c, user_id, username, first_name)
 
 
+def apply_referral(user_id: int, referrer_id: int) -> bool:
+    if user_id == referrer_id:
+        return False
+    with _db() as c:
+        target = c.execute("SELECT referred_by FROM users WHERE user_id=?", (user_id,)).fetchone()
+        referrer = c.execute("SELECT user_id FROM users WHERE user_id=?", (referrer_id,)).fetchone()
+        if not target or not referrer or target["referred_by"] is not None:
+            return False
+        c.execute("UPDATE users SET referred_by=?, updated_at=? WHERE user_id=?", (referrer_id, _now(), user_id))
+        c.execute("UPDATE users SET referrals=referrals+1, updated_at=? WHERE user_id=?", (_now(), referrer_id))
+        return True
+
+
+def get_referrals(user_id: int) -> int:
+    with _db() as c:
+        r = c.execute("SELECT referrals FROM users WHERE user_id=?", (user_id,)).fetchone()
+        return int(r[0]) if r else 0
+
+
+def active_logo_paths() -> set[str]:
+    active: set[str] = set()
+    with _db() as c:
+        rows = c.execute("SELECT watermark FROM users WHERE watermark IS NOT NULL UNION ALL SELECT watermark FROM channels WHERE watermark IS NOT NULL").fetchall()
+    for row in rows:
+        try:
+            wm = json.loads(row[0] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if wm.get("type") == "image" and wm.get("logo"):
+            active.add(str(wm["logo"]))
+    return active
+
+
 def get_user(user_id: int) -> sqlite3.Row | None:
     with _db() as c:
         return c.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
 
 
 def set_format(user_id: int, fmt: str) -> None:
-    with _db() as c:
-        c.execute("UPDATE users SET format=?,updated_at=? WHERE user_id=?", (fmt, _now(), user_id))
+    with _db() as c: c.execute("UPDATE users SET format=?,updated_at=? WHERE user_id=?", (fmt, _now(), user_id))
 
 
 def get_user_watermark(user_id: int) -> dict[str, Any]:
@@ -147,14 +169,12 @@ def get_user_watermark(user_id: int) -> dict[str, Any]:
 
 
 def set_user_watermark(user_id: int, value: dict[str, Any]) -> None:
-    with _db() as c:
-        c.execute("UPDATE users SET watermark=?,updated_at=? WHERE user_id=?", (json.dumps(value, ensure_ascii=False), _now(), user_id))
+    with _db() as c: c.execute("UPDATE users SET watermark=?,updated_at=? WHERE user_id=?", (json.dumps(value, ensure_ascii=False), _now(), user_id))
 
 
 def is_premium(user_id: int) -> bool:
     u = get_user(user_id)
-    if not u or u["permanent_premium"]:
-        return bool(u and u["permanent_premium"])
+    if not u or u["permanent_premium"]: return bool(u and u["permanent_premium"])
     until = _parse_premium_until(u["premium_until"])
     return until is not None and datetime.now(timezone.utc) < until
 
@@ -162,36 +182,30 @@ def is_premium(user_id: int) -> bool:
 def extend_premium(user_id: int, days: int) -> None:
     with _db() as c:
         u = c.execute("SELECT premium_until,permanent_premium FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if not u or u["permanent_premium"]:
-            return
+        if not u or u["permanent_premium"]: return
         base = datetime.now(timezone.utc)
         old = _parse_premium_until(u["premium_until"])
-        if old is not None:
-            base = max(base, old)
+        if old is not None: base = max(base, old)
         c.execute("UPDATE users SET premium_until=?,updated_at=? WHERE user_id=?", ((base + timedelta(days=days)).isoformat(), _now(), user_id))
 
 
 def list_channels(user_id: int) -> list[sqlite3.Row]:
-    with _db() as c:
-        return c.execute("SELECT * FROM channels WHERE user_id=? ORDER BY id", (user_id,)).fetchall()
+    with _db() as c: return c.execute("SELECT * FROM channels WHERE user_id=? ORDER BY id", (user_id,)).fetchall()
 
 
 def add_channel(user_id: int, channel_id: int, title: str) -> None:
     with _db() as c:
         count = c.execute("SELECT COUNT(*) FROM channels WHERE user_id=?", (user_id,)).fetchone()[0]
-        if count >= 3:
-            raise ValueError("maximum 3 channels")
+        if count >= 3: raise ValueError("maximum 3 channels")
         c.execute("INSERT INTO channels(user_id,channel_id,title,created_at) VALUES(?,?,?,?) ON CONFLICT(user_id,channel_id) DO UPDATE SET title=excluded.title", (user_id, channel_id, title, _now()))
 
 
 def remove_channel(user_id: int, channel_id: int) -> None:
-    with _db() as c:
-        c.execute("DELETE FROM channels WHERE user_id=? AND channel_id=?", (user_id, channel_id))
+    with _db() as c: c.execute("DELETE FROM channels WHERE user_id=? AND channel_id=?", (user_id, channel_id))
 
 
 def set_channel_enabled(user_id: int, channel_id: int, enabled: bool) -> None:
-    with _db() as c:
-        c.execute("UPDATE channels SET enabled=? WHERE user_id=? AND channel_id=?", (int(enabled), user_id, channel_id))
+    with _db() as c: c.execute("UPDATE channels SET enabled=? WHERE user_id=? AND channel_id=?", (int(enabled), user_id, channel_id))
 
 
 def get_channel_watermark(channel_id: int, user_id: int) -> dict[str, Any]:
@@ -201,8 +215,7 @@ def get_channel_watermark(channel_id: int, user_id: int) -> dict[str, Any]:
 
 
 def set_channel_watermark(channel_id: int, user_id: int, value: dict[str, Any]) -> None:
-    with _db() as c:
-        c.execute("UPDATE channels SET watermark=? WHERE channel_id=? AND user_id=?", (json.dumps(value, ensure_ascii=False), channel_id, user_id))
+    with _db() as c: c.execute("UPDATE channels SET watermark=? WHERE channel_id=? AND user_id=?", (json.dumps(value, ensure_ascii=False), channel_id, user_id))
 
 
 def get_setting(key: str, default: str = "") -> str:
@@ -212,22 +225,18 @@ def get_setting(key: str, default: str = "") -> str:
 
 
 def set_setting(key: str, value: str) -> None:
-    with _db() as c:
-        c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+    with _db() as c: c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
 
 def get_opp() -> list[sqlite3.Row]:
-    with _db() as c:
-        return c.execute("SELECT * FROM opp ORDER BY slot").fetchall()
+    with _db() as c: return c.execute("SELECT * FROM opp ORDER BY slot").fetchall()
 
 
 def set_opp(slot: int, enabled: bool, title: str, url: str) -> None:
-    with _db() as c:
-        c.execute("UPDATE opp SET enabled=?,title=?,url=? WHERE slot=?", (int(enabled), title, url, slot))
+    with _db() as c: c.execute("UPDATE opp SET enabled=?,title=?,url=? WHERE slot=?", (int(enabled), title, url, slot))
 
 
-def active_opp() -> list[sqlite3.Row]:
-    return [r for r in get_opp() if r["enabled"] and r["url"]]
+def active_opp() -> list[sqlite3.Row]: return [r for r in get_opp() if r["enabled"] and r["url"]]
 
 
 def save_payment(user_id: int, payload: str, days: int, stars: int, charge_id: str) -> bool:
@@ -237,6 +246,9 @@ def save_payment(user_id: int, payload: str, days: int, stars: int, charge_id: s
 
 
 async def aensure_user(user_id: int, username: str | None = None, first_name: str | None = None): return await asyncio.to_thread(ensure_user, user_id, username, first_name)
+async def aapply_referral(user_id: int, referrer_id: int) -> bool: return await asyncio.to_thread(apply_referral, user_id, referrer_id)
+async def aget_referrals(user_id: int) -> int: return await asyncio.to_thread(get_referrals, user_id)
+async def aactive_logo_paths() -> set[str]: return await asyncio.to_thread(active_logo_paths)
 async def aget_user(user_id: int): return await asyncio.to_thread(get_user, user_id)
 async def aset_format(user_id: int, fmt: str): return await asyncio.to_thread(set_format, user_id, fmt)
 async def aget_user_watermark(user_id: int) -> dict[str, Any]: return await asyncio.to_thread(get_user_watermark, user_id)
