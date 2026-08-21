@@ -957,7 +957,6 @@ async def dele(c: CallbackQuery):
     await c.answer("Удалено")
     await channels(c)
 
-
 @router.callback_query(F.data == "wm")
 async def wm(c: CallbackQuery):
     await c.answer()
