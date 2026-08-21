@@ -1,0 +1,26 @@
+name: Apply referral UI fix
+on:
+  push:
+    branches: [Media_hanter-v3]
+permissions:
+  contents: write
+jobs:
+  fix:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: Media_hanter-v3
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python tools/add_referral_ui.py
+      - run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add media_hunter_bot/handlers.py
+          git rm tools/add_referral_ui.py .github/workflows/apply-referral-ui.yml
+          git commit -m 'fix(v3): restore referral UI [skip ci]'
+          git push origin HEAD:Media_hanter-v3
