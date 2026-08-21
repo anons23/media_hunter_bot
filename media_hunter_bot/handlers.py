@@ -4,8 +4,11 @@ Critical fixes applied:
 1. StateFilter(None) on url_message/upload so they do NOT intercept FSM input.
 2. Engine queue-size tracking is now atomic via asyncio.Lock.
 3. Temporary directories are cleaned up via try/finally in every handler.
-4. OPP private-invite links are handled gracefully (skip check, warn admin).
-5. Monkey-patched bot.id is preserved but guarded.
+4. OPP private-invite links are handled gracefully.
+5. All blocking subprocess calls wrapped in asyncio.to_thread().
+6. restart() drains queued jobs and kills subprocesses.
+7. shutdown() kills FFmpeg/yt-dlp before stopping workers.
+8. ThrottlingMiddleware replies to Messages too.
 """
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ import os
 import secrets
 import shutil
 import signal
+import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,6 +60,7 @@ from . import db
 from .processor import (
     _is_valid_color,
     cleanup_media,
+    cleanup_logos,
     download,
     ffprobe,
     metadata,
@@ -94,6 +99,8 @@ class ThrottlingMiddleware(BaseMiddleware):
             if now - last < self.rate:
                 if isinstance(event, CallbackQuery):
                     await event.answer("Слишком быстро", show_alert=True)
+                elif isinstance(event, Message):
+                    await event.answer("⏳ Слишком быстро, подождите секунду.")
                 return None
             self._last[uid] = now
 
@@ -227,6 +234,7 @@ class Engine:
         self._queue_size = 0
         self._max_queue = MAX_QUEUE_SIZE
         self._lock = asyncio.Lock()
+        self._proc_lock = threading.Lock()
 
     async def start(self):
         for _ in range(MAX_CONCURRENT):
@@ -240,16 +248,17 @@ class Engine:
                     f"Очередь переполнена ({self._max_queue} задач). Попробуйте позже."
                 )
             self._queue_size += 1
+            self.seq += 1
+            seq = self.seq
 
         await db.aensure_user(uid)
-        self.seq += 1
         if source:
             self.uploads.setdefault(uid, set()).add(source.parent)
         premium = await db.ais_premium(uid)
         await self.q.put(
             Job(
                 0 if premium else 1,
-                self.seq,
+                seq,
                 uid,
                 self.gen.get(uid, 0),
                 url,
@@ -257,12 +266,13 @@ class Engine:
             )
         )
     def register(self, uid: int, proc):
-        if proc is None:
-            for p in list(self.processes.get(uid, set())):
-                if getattr(p, "returncode", None) is not None:
-                    self.processes[uid].discard(p)
-            return
-        self.processes.setdefault(uid, set()).add(proc)
+        with self._proc_lock:
+            if proc is None:
+                for p in list(self.processes.get(uid, set())):
+                    if getattr(p, "returncode", None) is not None:
+                        self.processes[uid].discard(p)
+                return
+            self.processes.setdefault(uid, set()).add(proc)
 
     def active_paths(self) -> set[str]:
         paths = set(self.active_work_dirs)
@@ -272,6 +282,23 @@ class Engine:
 
     async def restart(self, uid: int):
         self.gen[uid] = self.gen.get(uid, 0) + 1
+        # Drain queued jobs for this user to free queue slots
+        drained = 0
+        temp = []
+        while not self.q.empty():
+            try:
+                j = self.q.get_nowait()
+                if j.uid == uid:
+                    drained += 1
+                else:
+                    temp.append(j)
+            except asyncio.QueueEmpty:
+                break
+        for j in temp:
+            await self.q.put(j)
+        async with self._lock:
+            self._queue_size = max(0, self._queue_size - drained)
+        # Cancel running tasks
         tasks = list(self.tasks.get(uid, set()))
         for t in tasks:
             if not t.done():
@@ -279,7 +306,11 @@ class Engine:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.tasks.pop(uid, None)
-        for p in list(self.processes.get(uid, set())):
+        # Kill subprocesses
+        with self._proc_lock:
+            procs = list(self.processes.get(uid, set()))
+            self.processes.pop(uid, None)
+        for p in procs:
             try:
                 if p.returncode is None:
                     p.terminate()
@@ -291,7 +322,7 @@ class Engine:
                         p.kill()
             except Exception:
                 pass
-        self.processes.pop(uid, None)
+        # Clean upload dirs
         for root in list(self.uploads.pop(uid, set())):
             await asyncio.to_thread(shutil.rmtree, root, ignore_errors=True)
 
@@ -336,7 +367,7 @@ class Engine:
 
             # ── download / resolve source ──────────────────────────────────
             if j.url:
-                items = await playlist_items(j.url, MAX_PLAYLIST_ITEMS)
+                items = await asyncio.to_thread(playlist_items, j.url, MAX_PLAYLIST_ITEMS)
                 if len(items) > 1:
                     for u in items:
                         await self.add(j.uid, url=u)
@@ -349,7 +380,7 @@ class Engine:
                     raise RuntimeError(
                         "Плейлист или ссылка не содержит доступного видео"
                     )
-                source = await download(j.url, work, register)
+                source = await asyncio.to_thread(download, j.url, work, register)
             else:
                 source = j.source
 
@@ -364,7 +395,8 @@ class Engine:
             limit = MAX_URL_LOGICAL_MB * 1024 * 1024
 
             # 1st pass
-            result = await process_media(
+            result = await asyncio.to_thread(
+                process_media,
                 source,
                 work,
                 await db.aget_user_watermark(j.uid),
@@ -377,7 +409,8 @@ class Engine:
             # 2nd pass: watermark bloated the file
             needs_second = not audio_only and not oversized and result_size > limit
             if needs_second:
-                result = await process_media(
+                result = await asyncio.to_thread(
+                    process_media,
                     source,
                     work,
                     await db.aget_user_watermark(j.uid),
@@ -410,7 +443,8 @@ class Engine:
                     if audio_only:
                         cr = result
                     else:
-                        cr = await process_media(
+                        cr = await asyncio.to_thread(
+                            process_media,
                             source,
                             work,
                             await db.aget_channel_watermark(ch["channel_id"], j.uid),
@@ -421,7 +455,8 @@ class Engine:
                         cr_size = (await asyncio.to_thread(cr.stat)).st_size
                         # 2nd pass: channel watermark bloated the file
                         if not oversized and cr_size > limit:
-                            cr = await process_media(
+                            cr = await asyncio.to_thread(
+                                process_media,
                                 source,
                                 work,
                                 await db.aget_channel_watermark(ch["channel_id"], j.uid),
@@ -493,12 +528,32 @@ class Engine:
                 await asyncio.to_thread(
                     cleanup_media, CLEANER_AGE_HOURS, self.active_paths()
                 )
+                await asyncio.to_thread(
+                    cleanup_logos, CLEANER_AGE_HOURS * 7, set()
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("Cleaner failed")
 
     async def shutdown(self):
+        # Kill running subprocesses first
+        with self._proc_lock:
+            all_procs = [(uid, list(procs)) for uid, procs in self.processes.items()]
+        for uid, procs in all_procs:
+            for p in procs:
+                try:
+                    if p.returncode is None:
+                        p.terminate()
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.to_thread(p.wait), timeout=3
+                            )
+                        except asyncio.TimeoutError:
+                            p.kill()
+                except Exception:
+                    pass
+        self.processes.clear()
         if self.cleaner_task:
             self.cleaner_task.cancel()
         for t in list(self.workers):
@@ -737,6 +792,7 @@ async def upload(m: Message, bot: Bot, engine: Engine):
     p = MEDIA_DIR / f"upload_{m.from_user.id}_{uuid.uuid4().hex}"
     p.mkdir(parents=True, exist_ok=True)
     dst = p / "upload.mp4"
+    handed = False
 
     try:
         f = await asyncio.wait_for(bot.get_file(m.video.file_id), timeout=60)
@@ -746,16 +802,14 @@ async def upload(m: Message, bot: Bot, engine: Engine):
         if dst.stat().st_size > MAX_USER_UPLOAD_MB * 1024 * 1024:
             raise RuntimeError(f"Файл превышает лимит {MAX_USER_UPLOAD_MB} МБ")
         await engine.add(m.from_user.id, source=dst)
+        handed = True
         await m.answer("⏳ Видео принято в очередь.")
     except RuntimeError as e:
         await m.answer(f"❌ {e}")
     except Exception:
         raise
     finally:
-        # Clean up if we never handed the file to the engine
-        if dst.exists() and p.exists() and not any(
-            dst.parent == root for roots in engine.uploads.values() for root in roots
-        ):
+        if not handed:
             await asyncio.to_thread(shutil.rmtree, p, ignore_errors=True)
 
 
@@ -809,12 +863,8 @@ async def addch_value(m: Message, state: FSMContext, bot: Bot):
             await m.answer("❌ Пришлите @username или ID канала.")
             return
         chat = await bot.get_chat(text)
-        # Use cached bot identity (set in main())
-        bot_id = getattr(bot, "id", None)
-        if bot_id is None:
-            me = await bot.get_me()
-            bot_id = me.id
-        me_member = await bot.get_chat_member(chat.id, bot_id)
+        # bot.id is a property in aiogram 3.x — use it directly
+        me_member = await bot.get_chat_member(chat.id, bot.id)
         if me_member.status not in ("administrator", "creator"):
             raise RuntimeError("Сначала добавьте бота в администраторы канала.")
         await db.aadd_channel(
@@ -880,6 +930,7 @@ async def toggle(c: CallbackQuery):
 
 @router.callback_query(F.data.startswith("del:"))
 async def dele(c: CallbackQuery):
+    await db.aremove_channel(c.from_user.id, int(c.data.split(":", 1)
     await db.aremove_channel(c.from_user.id, int(c.data.split(":", 1)[1]))
     await c.answer("Удалено")
     await channels(c)
@@ -1021,6 +1072,8 @@ async def logovalue(m: Message, bot: Bot, state: FSMContext):
     except Exception:
         p.unlink(missing_ok=True)
         raise
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Admin handlers
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1089,8 +1142,13 @@ async def oppvalue(m: Message, state: FSMContext):
         await db.aset_opp(slot, False, "", "")
     else:
         p = text.split("|", 2)
-        if len(p) != 3 or not p[2].startswith("https://t.me/"):
+        if len(p) != 3:
             await m.answer("Формат: ВКЛ|Название|https://t.me/канал")
+            return
+        scheme = urlparse(p[2].strip()).scheme
+        host = urlparse(p[2].strip()).hostname
+        if scheme != "https" or host not in ("t.me", "telegram.me"):
+            await m.answer("❌ Нужна ссылка https://t.me/...")
             return
         await db.aset_opp(
             slot, p[0].strip().upper() == "ВКЛ", p[1].strip(), p[2].strip()
@@ -1142,7 +1200,8 @@ async def astars(c: CallbackQuery, state: FSMContext):
 async def astarsvalue(m: Message, state: FSMContext):
     if m.from_user.id != ADMIN_ID:
         return
-    if not (m.text or "").startswith("https://t.me/"):
+    parsed = urlparse((m.text or "").strip())
+    if parsed.scheme != "https" or parsed.hostname not in ("t.me", "telegram.me"):
         await m.answer("❌ Нужна ссылка https://t.me/...")
         return
     await db.aset_setting("stars_link", m.text.strip())
@@ -1190,7 +1249,7 @@ async def _exit_later():
 
 async def _reboot_later():
     await asyncio.sleep(1)
-    for cmd in (("systemctl", "reboot"), ("sudo", "/sbin/reboot")):
+    for cmd in (("systemctl", "reboot"), ("/sbin/reboot",)):
         proc = await asyncio.create_subprocess_exec(*cmd)
         try:
             await asyncio.wait_for(proc.wait(), timeout=10)
@@ -1201,7 +1260,7 @@ async def _reboot_later():
                 proc.terminate()
             except ProcessLookupError:
                 pass
-    logger.error("Failed to reboot VPS: both systemctl and sudo failed")
+    logger.error("Failed to reboot VPS: both systemctl and /sbin/reboot failed")
 
 
 @router.message(Command("paysupport"))
@@ -1227,9 +1286,8 @@ async def main():
     dp["engine"] = engine
     dp.include_router(router)
 
-    # Cache bot identity so handlers avoid extra get_me() calls
-    me = await bot.get_me()
-    bot.id = me.id  # type: ignore[attr-defined]
+    # bot.id is a property in aiogram 3.x — do NOT assign to it
+    await bot.get_me()  # warms up the cache only
 
     # Graceful shutdown on SIGTERM / SIGINT
     def _signal_handler(sig):
