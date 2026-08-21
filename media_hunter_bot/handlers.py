@@ -586,6 +586,22 @@ async def start(m: Message, bot: Bot):
     await m.answer("👋 Media Hunter готов.", reply_markup=menu(m.from_user.id))
 
 
+@router.callback_query(F.data == "menu_ref")
+async def menu_ref(c: CallbackQuery, bot: Bot):
+    me = await bot.get_me()
+    username = me.username
+    if not username:
+        await c.answer("Не удалось получить ссылку реферала.", show_alert=True)
+        return
+    count = await db.aget_referrals(c.from_user.id)
+    link = f"https://t.me/{username}?start=ref_{c.from_user.id}"
+    await c.answer()
+    await c.message.edit_text(
+        f"🎁 Ваша реферальная ссылка:\n{link}\n\nПриглашено пользователей: {count}",
+        reply_markup=kb([[B("◀️ Назад", "back")]]),
+    )
+
+
 @router.callback_query(F.data == "check_opp")
 async def check_opp(c: CallbackQuery, bot: Bot):
     missing, rows = await opp_check(bot, c.from_user.id)
