@@ -1,7 +1,25 @@
 # Media Hunter Bot
 
-## Установка на слабом сервере (1 vCPU / 4 GB / 10 GB)
+## Media Hunter 3.0
 
-### 1. Системные зависимости
+Telegram bot for downloading, processing and autoposting media.
+
+### Requirements
+- Python 3.11+
+- FFmpeg / ffprobe
+- `yt-dlp`
+- Optional local `telegram-bot-api`
+
+### Setup
+
 ```bash
-apt update && apt install -y python3-pip python3-venv ffmpeg
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r media_hunter_bot/requirements.txt
+cp .env.example .env
+python main.py
+```
+
+`LOCAL_BOT_API` is optional. If it is empty, the bot uses the official Telegram Bot API.
+
+The default media/upload logical limit is 49 MB.
