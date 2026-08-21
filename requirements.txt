@@ -1,0 +1,4 @@
+aiogram==3.17.0
+aiohttp==3.11.11
+yt-dlp==2025.1.12
+python-dotenv==1.1.1
