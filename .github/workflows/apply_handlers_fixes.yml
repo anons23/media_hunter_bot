@@ -1,0 +1,76 @@
+name: Apply pending handlers fixes
+
+on:
+  push:
+    branches: [Media_hanter-v3]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: contains(github.event.head_commit.message, 'Apply pending handlers fixes')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: Media_hanter-v3
+          fetch-depth: 1
+      - name: Apply handlers fixes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('media_hunter_bot/handlers.py')
+          s = p.read_text(encoding='utf-8')
+          old = 'if isinstance(event, CallbackQuery):\n                    await event.answer("Слишком быстро", show_alert=True)\n                return None'
+          new = 'if isinstance(event, CallbackQuery):\n                    await event.answer("Слишком быстро", show_alert=True)\n                elif isinstance(event, Message):\n                    await event.answer("⏳ Слишком быстро, подождите секунду.")\n                return None'
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = 'async def add(self, uid: int, url: str | None = None, source: Path | None = None):\n        async with self._lock:\n            if self._queue_size >= self._max_queue:\n                raise RuntimeError(\n                    f"Очередь переполнена ({self._max_queue} задач). Попробуйте позже."\n                )\n            self._queue_size += 1\n\n        await db.aensure_user(uid)\n        self.seq += 1'
+          new = 'async def add(self, uid: int, url: str | None = None, source: Path | None = None):\n        async with self._lock:\n            if self._queue_size >= self._max_queue:\n                raise RuntimeError(\n                    f"Очередь переполнена ({self._max_queue} задач). Попробуйте позже."\n                )\n            self._queue_size += 1\n            self.seq += 1\n            seq = self.seq\n\n        await db.aensure_user(uid)'
+          assert old in s
+          s = s.replace(old, new, 1)
+          s = s.replace('                self.seq,\n                uid,', '                seq,\n                uid,', 1)
+
+          old = '    async def restart(self, uid: int):\n        self.gen[uid] = self.gen.get(uid, 0) + 1\n        tasks = list(self.tasks.get(uid, set()))'
+          new = '    async def restart(self, uid: int):\n        self.gen[uid] = self.gen.get(uid, 0) + 1\n        drained = 0\n        temp = []\n        while not self.q.empty():\n            try:\n                j = self.q.get_nowait()\n                if j.uid == uid:\n                    drained += 1\n                    self.q.task_done()\n                else:\n                    temp.append(j)\n            except asyncio.QueueEmpty:\n                break\n        for j in temp:\n            await self.q.put(j)\n        async with self._lock:\n            self._queue_size = max(0, self._queue_size - drained)\n        tasks = list(self.tasks.get(uid, set()))'
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '    async def shutdown(self):\n        if self.cleaner_task:\n            self.cleaner_task.cancel()'
+          new = '    async def shutdown(self):\n        for uid, procs in list(self.processes.items()):\n            for proc in list(procs):\n                try:\n                    if proc.returncode is None:\n                        proc.terminate()\n                        try:\n                            proc.wait(timeout=3)\n                        except TimeoutError:\n                            proc.kill()\n                except Exception:\n                    pass\n        if self.cleaner_task:\n            self.cleaner_task.cancel()'
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          s = s.replace('items = await playlist_items(j.url, MAX_PLAYLIST_ITEMS)', 'items = await asyncio.to_thread(playlist_items, j.url, MAX_PLAYLIST_ITEMS)', 1)
+          s = s.replace('source = await download(j.url, work, register)', 'source = await asyncio.to_thread(download, j.url, work, register)', 1)
+          s = s.replace('result = await process_media(\n                source,', 'result = await asyncio.to_thread(process_media,\n                source,', 2)
+          s = s.replace('result = await process_media(\n                    source,', 'result = await asyncio.to_thread(process_media,\n                    source,', 1)
+          s = s.replace('cr = await process_media(\n                            source,', 'cr = await asyncio.to_thread(process_media,\n                            source,', 2)
+
+          old = '    try:\n        f = await asyncio.wait_for(bot.get_file(m.video.file_id), timeout=60)\n        await asyncio.wait_for(\n            bot.download_file(f.file_path, destination=dst), timeout=300\n        )\n        if dst.stat().st_size > MAX_USER_UPLOAD_MB * 1024 * 1024:\n            raise RuntimeError(f"Файл превышает лимит {MAX_USER_UPLOAD_MB} МБ")\n        await engine.add(m.from_user.id, source=dst)\n        await m.answer("⏳ Видео принято в очередь.")\n    except RuntimeError as e:\n        await m.answer(f"❌ {e}")\n    except Exception:\n        raise\n    finally:\n        # Clean up if we never handed the file to the engine\n        if dst.exists() and p.exists() and not any(\n            dst.parent == root for roots in engine.uploads.values() for root in roots\n        ):\n            await asyncio.to_thread(shutil.rmtree, p, ignore_errors=True)'
+          new = '    handed = False\n    try:\n        f = await asyncio.wait_for(bot.get_file(m.video.file_id), timeout=60)\n        await asyncio.wait_for(\n            bot.download_file(f.file_path, destination=dst), timeout=300\n        )\n        if dst.stat().st_size > MAX_USER_UPLOAD_MB * 1024 * 1024:\n            raise RuntimeError(f"Файл превышает лимит {MAX_USER_UPLOAD_MB} МБ")\n        await engine.add(m.from_user.id, source=dst)\n        handed = True\n        await m.answer("⏳ Видео принято в очередь.")\n    except RuntimeError as e:\n        await m.answer(f"❌ {e}")\n    except Exception:\n        raise\n    finally:\n        if not handed:\n            await asyncio.to_thread(shutil.rmtree, p, ignore_errors=True)'
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '    # Cache bot identity so handlers avoid extra get_me() calls\n    me = await bot.get_me()\n    bot.id = me.id  # type: ignore[attr-defined]'
+          new = '    # Warm up bot identity cache; do not monkey-patch Bot.id.\n    await bot.get_me()'
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = 'for cmd in (("systemctl", "reboot"), ("sudo", "/sbin/reboot")):'
+          new = 'for cmd in (("systemctl", "reboot"), ("/sbin/reboot",)):'
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          p.write_text(s, encoding='utf-8')
+          PY
+          python3 -m py_compile media_hunter_bot/handlers.py media_hunter_bot/db.py media_hunter_bot/config.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add media_hunter_bot/handlers.py
+          git commit -m 'fix: complete handlers concurrency and cleanup fixes'
+          git push origin Media_hanter-v3
