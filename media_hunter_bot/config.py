@@ -1,7 +1,7 @@
 """Конфигурация Media Hunter Bot.
 
 Все чувствительные значения читаются из переменных окружения.
-Для локального запуска создайте файл .env рядом с ботом.
+Для локального запуска можно использовать .env через внешний загрузчик.
 """
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ import os
 from pathlib import Path
 
 # ── Base directories ────────────────────────────────────────────────────────
-BASE_DIR = Path(os.getenv("MEDIA_HUNTER_HOME", "/root/media_hunter_bot"))
+# Default to the project directory instead of assuming /root.
+BASE_DIR = Path(os.getenv("MEDIA_HUNTER_HOME", str(Path(__file__).resolve().parent.parent)))
 DATA_DIR = BASE_DIR / "data"
 MEDIA_DIR = BASE_DIR / "media"
 LOGO_DIR = DATA_DIR / "logos"
