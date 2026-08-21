@@ -23,3 +23,5 @@ python main.py
 `LOCAL_BOT_API` is optional. If it is empty, the bot uses the official Telegram Bot API.
 
 The default media/upload logical limit is 49 MB.
+
+V3 verification is run automatically after changes to the branch.
