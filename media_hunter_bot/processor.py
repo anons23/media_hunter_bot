@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
+
 def _run(cmd: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
     """Run a command, capture output, raise on non-zero after logging."""
     logger.debug("Running: %s", " ".join(cmd))
@@ -41,6 +42,7 @@ def _run(cmd: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
 
 
 # ── cleanup ─────────────────────────────────────────────────────────────────
+
 
 def cleanup_media(age_hours: int, protected_paths: set[str]) -> None:
     """Remove files under MEDIA_DIR older than age_hours, skipping protected_paths."""
@@ -70,6 +72,7 @@ def cleanup_media(age_hours: int, protected_paths: set[str]) -> None:
 
 
 # ── yt-dlp ──────────────────────────────────────────────────────────────────
+
 
 def playlist_items(url: str, max_items: int) -> list[str]:
     """Return a list of video URLs if *url* is a playlist, otherwise empty list."""
@@ -141,6 +144,7 @@ def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> Path:
 
 # ── ffprobe / metadata ──────────────────────────────────────────────────────
 
+
 def ffprobe(path: Path) -> tuple[dict[str, Any], int]:
     """Return (ffprobe JSON dict, file_size_bytes)."""
     cmd = [
@@ -168,9 +172,33 @@ def metadata(path: Path) -> dict[str, str]:
         "title": tags.get("title") or tags.get("TITLE") or path.stem,
         "description": tags.get("description") or tags.get("DESCRIPTION") or "",
     }
-
-
 # ── ffmpeg processing ───────────────────────────────────────────────────────
+
+
+# ── color validation ────────────────────────────────────────────────────────
+
+# Whitelist: named colors ffmpeg understands + hex colors
+_VALID_COLOR_NAMES = frozenset({
+    "white", "black", "red", "green", "blue", "yellow", "cyan", "magenta",
+    "orange", "pink", "purple", "brown", "gray", "grey", "silver", "gold",
+    "lime", "navy", "teal", "olive", "maroon", "violet", "indigo", "turquoise",
+})
+
+
+def _is_valid_color(color: str) -> bool:
+    """Validate color: named color or #RRGGBB / #RGB."""
+    c = color.lower().strip()
+    if c in _VALID_COLOR_NAMES:
+        return True
+    if c.startswith("#"):
+        # #RGB or #RRGGBB
+        hex_part = c[1:]
+        if len(hex_part) == 3 and all(ch in "0123456789abcdef" for ch in hex_part):
+            return True
+        if len(hex_part) == 6 and all(ch in "0123456789abcdef" for ch in hex_part):
+            return True
+    return False
+
 
 def _build_watermark_filter(wm: dict[str, Any], width: int, height: int) -> str | None:
     """Build ffmpeg drawtext/overlay filter string from watermark config."""
@@ -181,7 +209,8 @@ def _build_watermark_filter(wm: dict[str, Any], width: int, height: int) -> str 
             return None
         pos = wm.get("position", "br")
         size = int(wm.get("size", 28))
-        color = wm.get("color", "white")
+        raw_color = wm.get("color", "white")
+        color = raw_color if _is_valid_color(raw_color) else "white"
         opacity = float(wm.get("opacity", 0.8))
 
         # Position mapping
@@ -284,6 +313,7 @@ def process_media(
 
 
 # ── logo validation ─────────────────────────────────────────────────────────
+
 
 def validate_logo(path: Path) -> tuple[bool, str]:
     """Check logo file size and dimensions. Returns (ok, error_message)."""
