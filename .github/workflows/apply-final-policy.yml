@@ -1,0 +1,84 @@
+name: Apply final media policy patch
+
+on:
+  push:
+    branches: [Media_hanter-v3-security]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[final-policy]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: Media_hanter-v3-security
+
+      - name: Apply guarded source edits
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path('media_hunter_bot/handlers.py')
+          s = p.read_text(encoding='utf-8')
+
+          s = s.replace('    MAX_URL_LOGICAL_MB,\n    MAX_USER_UPLOAD_MB,', '    MAX_URL_LOGICAL_MB,\n    MAX_SOURCE_DOWNLOAD_MB,\n    MAX_USER_UPLOAD_MB,')
+
+          orphan = '''\n\n\n    if c.from_user.id != ADMIN_ID:\n        return\n    await c.answer("VPS перезагружается", show_alert=True)\n    asyncio.create_task(_reboot_later())\n'''
+          if orphan not in s:
+              raise SystemExit('Expected reboot orphan block was not found')
+          s = s.replace(orphan, '\n')
+          if '_reboot_later' in s or 'VPS перезагружается' in s:
+              raise SystemExit('Reboot leftovers remain after patch')
+
+          old_playlist = '''                        for u in items:\n                            self.seq += 1\n                            self._queue_size += 1\n                            self._user_queue_size[j.uid] = self._user_queue_size.get(j.uid, 0) + 1\n                            jobs.append(Job(0 if premium else 1, self.seq, j.uid, generation, u, None))\n'''
+          new_playlist = '''                        for u in items:\n                            try:\n                                safe_item_url = validate_source_url(u)\n                            except ValueError:\n                                logger.warning("Skipping unsafe playlist item for uid=%s: %s", j.uid, u)\n                                continue\n                            self.seq += 1\n                            self._queue_size += 1\n                            self._user_queue_size[j.uid] = self._user_queue_size.get(j.uid, 0) + 1\n                            jobs.append(Job(0 if premium else 1, self.seq, j.uid, generation, safe_item_url, None))\n'''
+          if old_playlist not in s:
+              raise SystemExit('Expected playlist enqueue block was not found')
+          s = s.replace(old_playlist, new_playlist)
+
+          old_media = '''            # ── probe & limits ─────────────────────────────────────────────\n            _, size = await asyncio.to_thread(ffprobe, source)\n            oversized = size > MAX_URL_LOGICAL_MB * 1024 * 1024\n            fmt = user["format"]\n            audio_only = fmt == "mp3"\n            limit = MAX_URL_LOGICAL_MB * 1024 * 1024\n\n            # 1st pass\n            result = await asyncio.to_thread(\n                process_media,\n                source,\n                work,\n                await db.aget_user_watermark(j.uid),\n                audio_only=audio_only,\n                compress=oversized and not audio_only,\n                register=register,\n            )\n            result_size = (await asyncio.to_thread(result.stat)).st_size\n\n            # 2nd pass: watermark bloated the file\n            needs_second = not audio_only and not oversized and result_size > limit\n            if needs_second:\n                result = await asyncio.to_thread(\n                    process_media,\n                    source,\n                    work,\n                    await db.aget_user_watermark(j.uid),\n                    audio_only=False,\n                    compress=True,\n                    register=register,\n                )\n                result_size = (await asyncio.to_thread(result.stat)).st_size\n\n            if not audio_only and result_size > limit:\n                raise RuntimeError(\n                    f"Не удалось подготовить видео до лимита {MAX_URL_LOGICAL_MB} МБ"\n                )\n\n            # ── send to user ───────────────────────────────────────────────\n            meta = await asyncio.to_thread(metadata, source)\n            caption = str(meta.get("description") or meta.get("title") or "")[:900]\n            if oversized:\n                caption += (\n                    f"\\n\\nℹ️ Исходный файл превышал {MAX_URL_LOGICAL_MB} МБ. "\n                    "Видео сжато до установленного лимита."\n                )\n            await self._send_private(j.uid, result, caption)\n'''
+          new_media = '''            # ── probe & media policy ──────────────────────────────────────\n            _, size = await asyncio.to_thread(ffprobe, source)\n            hard_limit = MAX_SOURCE_DOWNLOAD_MB * 1024 * 1024\n            unique_limit = MAX_URL_LOGICAL_MB * 1024 * 1024\n            if size > hard_limit:\n                raise RuntimeError(\n                    f"Исходный файл превышает абсолютный лимит {MAX_SOURCE_DOWNLOAD_MB} МБ"\n                )\n\n            fmt = user["format"]\n            audio_only = fmt == "mp3"\n            oversized = (not audio_only) and size > unique_limit\n            watermark = await db.aget_user_watermark(j.uid)\n\n            if oversized:\n                # Large videos are sent as-is. Do not spend the 1-CPU VPS on\n                # FFmpeg and do not degrade long/high-quality originals.\n                result = source\n            else:\n                # First pass keeps quality. If watermarking pushes the result\n                # over 100 MB, a second compressed pass is attempted.\n                result = await asyncio.to_thread(\n                    process_media,\n                    source,\n                    work,\n                    watermark,\n                    audio_only=audio_only,\n                    compress=False,\n                    register=register,\n                )\n                result_size = (await asyncio.to_thread(result.stat)).st_size\n                if not audio_only and result_size > unique_limit:\n                    result = await asyncio.to_thread(\n                        process_media,\n                        source,\n                        work,\n                        watermark,\n                        audio_only=False,\n                        compress=True,\n                        register=register,\n                    )\n                    result_size = (await asyncio.to_thread(result.stat)).st_size\n                    if result_size > unique_limit:\n                        # We cannot safely guarantee the 100 MB unique output;\n                        # fall back to the original instead of failing the job.\n                        result = source\n                        oversized = True\n\n            # ── send to user ───────────────────────────────────────────────\n            meta = await asyncio.to_thread(metadata, source)\n            caption = str(meta.get("description") or meta.get("title") or "")[:900]\n            if oversized:\n                caption += (\n                    f"\\n\\nℹ️ Файл больше {MAX_URL_LOGICAL_MB} МБ, поэтому отправлен оригинал без уникализации."\n                )\n            await self._send_private(j.uid, result, caption)\n'''
+          if old_media not in s:
+              raise SystemExit('Expected media policy block was not found')
+          s = s.replace(old_media, new_media)
+
+          old_channels = '''                    if audio_only:\n                        cr = result\n                    else:\n                        cr = await asyncio.to_thread(\n                            process_media,\n                            source,\n                            work,\n                            await db.aget_channel_watermark(ch["channel_id"], j.uid),\n                            audio_only=False,\n                            compress=oversized,\n                            register=register,\n                        )\n                        cr_size = (await asyncio.to_thread(cr.stat)).st_size\n                        # 2nd pass: channel watermark bloated the file\n                        if not oversized and cr_size > limit:\n                            cr = await asyncio.to_thread(\n                                process_media,\n                                source,\n                                work,\n                                await db.aget_channel_watermark(ch["channel_id"], j.uid),\n                                audio_only=False,\n                                compress=True,\n                                register=register,\n                            )\n                            cr_size = (await asyncio.to_thread(cr.stat)).st_size\n                        if cr_size > limit:\n                            raise RuntimeError(\n                                f"канальное видео превышает лимит {MAX_URL_LOGICAL_MB} МБ"\n                            )\n'''
+          new_channels = '''                    if audio_only or oversized:\n                        cr = result if audio_only else source\n                    else:\n                        channel_wm = await db.aget_channel_watermark(ch["channel_id"], j.uid)\n                        cr = await asyncio.to_thread(\n                            process_media,\n                            source,\n                            work,\n                            channel_wm,\n                            audio_only=False,\n                            compress=False,\n                            register=register,\n                        )\n                        cr_size = (await asyncio.to_thread(cr.stat)).st_size\n                        if cr_size > unique_limit:\n                            cr = await asyncio.to_thread(\n                                process_media,\n                                source,\n                                work,\n                                channel_wm,\n                                audio_only=False,\n                                compress=True,\n                                register=register,\n                            )\n                            if (await asyncio.to_thread(cr.stat)).st_size > unique_limit:\n                                cr = source\n'''
+          if old_channels not in s:
+              raise SystemExit('Expected channel media block was not found')
+          s = s.replace(old_channels, new_channels)
+
+          old_upload = '''    if m.video.file_size and m.video.file_size > MAX_USER_UPLOAD_MB * 1024 * 1024:\n        await m.answer(f"❌ Максимум {MAX_USER_UPLOAD_MB} МБ.")\n        return\n'''
+          new_upload = '''    if m.video.file_size and m.video.file_size > MAX_USER_UPLOAD_MB * 1024 * 1024:\n        await m.answer(f"❌ Максимальный размер файла — {MAX_USER_UPLOAD_MB} МБ.")\n        return\n'''
+          if old_upload not in s:
+              raise SystemExit('Expected upload pre-check was not found')
+          s = s.replace(old_upload, new_upload)
+
+          old_upload_post = '''        if dst.stat().st_size > MAX_USER_UPLOAD_MB * 1024 * 1024:\n            raise RuntimeError(f"Файл превышает лимит {MAX_USER_UPLOAD_MB} МБ")\n'''
+          new_upload_post = '''        if dst.stat().st_size > MAX_USER_UPLOAD_MB * 1024 * 1024:\n            raise RuntimeError(f"Файл превышает абсолютный лимит {MAX_USER_UPLOAD_MB} МБ")\n'''
+          if old_upload_post not in s:
+              raise SystemExit('Expected upload post-check was not found')
+          s = s.replace(old_upload_post, new_upload_post)
+
+          old_update = '''        "🔄 yt-dlp проверяется каждый день в 06:00 по Москве и после загрузки VPS. Если версия изменилась — бот перезапускается.",'''
+          new_update = '''        "🔄 yt-dlp закреплён на версии из requirements.txt. Для ручного обновления обновите пакет на сервере и перезапустите бота.",'''
+          if old_update not in s:
+              raise SystemExit('Expected yt-dlp admin text was not found')
+          s = s.replace(old_update, new_update)
+
+          p.write_text(s, encoding='utf-8')
+          print('handlers.py final policy patch applied')
+
+      - name: Syntax check
+        run: python -m py_compile main.py media_hunter_bot/*.py
+
+      - name: Commit final policy patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add media_hunter_bot/handlers.py
+          git diff --cached --quiet || git commit -m "fix: finalize 100mb unique and original media policy [final-policy]"
+          git push origin Media_hanter-v3-security
