@@ -1,0 +1,71 @@
+name: Apply security follow-up
+on:
+  push:
+    branches: [Media_hanter-v3-security]
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: "!contains(github.event.head_commit.message, '[security-followup]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: Media_hanter-v3-security
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Harden existing security patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          # processor.py: confine configured logo paths to LOGO_DIR after resolving symlinks.
+          p = Path('media_hunter_bot/processor.py')
+          s = p.read_text(encoding='utf-8')
+          old = '''def _logo_path(wm: dict[str, Any]) -> Path | None:\n    raw = str(wm.get("logo", ""))\n    if not raw:\n        return None\n    p = Path(raw).resolve()\n    if not p.exists() or not p.is_file():\n        return None\n    return p\n'''
+          new = '''def _logo_path(wm: dict[str, Any]) -> Path | None:\n    raw = str(wm.get("logo", "")).strip()\n    if not raw:\n        return None\n    root = LOGO_DIR.resolve()\n    p = Path(raw).resolve()\n    try:\n        p.relative_to(root)\n    except ValueError:\n        logger.warning("Rejected logo path outside LOGO_DIR: %s", raw)\n        return None\n    if not p.exists() or not p.is_file():\n        return None\n    return p\n'''
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif 'p.relative_to(root)' not in s:
+              raise SystemExit('logo path anchor not found')
+          p.write_text(s, encoding='utf-8')
+
+          # handlers.py: an existing private OPP entry must never be silently treated as satisfied.
+          p = Path('media_hunter_bot/handlers.py')
+          s = p.read_text(encoding='utf-8')
+          old = '''        if target is None:\n            logger.warning("OPP slot %s uses a private invite link; membership cannot be verified", r["slot"])\n            continue\n'''
+          new = '''        if target is None:\n            logger.error("OPP slot %s uses an unverifiable private invite link; blocking access until admin fixes it", r["slot"])\n            missing = True\n            rows.append([B(f"⚠️ ОПП {r['slot']} требует настройки", url=r["url"])])\n            continue\n'''
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif 'unverifiable private invite link' not in s:
+              raise SystemExit('OPP runtime anchor not found')
+
+          # restart(): jobs removed directly from PriorityQueue must also decrement unfinished_tasks.
+          old = '''            if removed:\n                self.q._queue[:] = kept\n                heapq.heapify(self.q._queue)\n                self._queue_size = max(0, self._queue_size - removed)\n'''
+          new = '''            if removed:\n                self.q._queue[:] = kept\n                heapq.heapify(self.q._queue)\n                for _ in range(removed):\n                    self.q.task_done()\n                self._queue_size = max(0, self._queue_size - removed)\n'''
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif 'for _ in range(removed):\n                    self.q.task_done()' not in s:
+              raise SystemExit('restart accounting anchor not found')
+          p.write_text(s, encoding='utf-8')
+          PY
+          python -m py_compile media_hunter_bot/processor.py media_hunter_bot/handlers.py media_hunter_bot/db.py media_hunter_bot/config.py main.py
+          python - <<'PY'
+          from pathlib import Path
+          s = Path('media_hunter_bot/handlers.py').read_text(encoding='utf-8')
+          assert 'areboot' not in s and 'async def areboot' not in s and 'def _reboot_later' not in s
+          p = Path('media_hunter_bot/processor.py').read_text(encoding='utf-8')
+          assert 'p.relative_to(root)' in p
+          print('security follow-up assertions passed')
+          PY
+      - name: Commit and remove follow-up workflow
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add media_hunter_bot/handlers.py media_hunter_bot/processor.py .github/workflows/apply-security-followup.yml
+          git rm -f .github/workflows/apply-security-followup.yml
+          git commit -m 'fix(v3): close remaining security gaps [security-followup]'
+          git push origin HEAD:Media_hanter-v3-security
