@@ -158,14 +158,18 @@ def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> Path:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
-            raise RuntimeError("yt-dlp timed out (10 min)")
+            logger.warning("yt-dlp timed out (10 min) for work_dir=%s", work_dir)
+            raise RuntimeError("Превышено время ожидания при скачивании. Попробуйте позже.")
         finally:
             register(None)
         if proc.returncode != 0:
-            raise RuntimeError(f"yt-dlp error: {stderr.decode('utf-8', 'replace')[:800]}")
+            err_text = stderr.decode("utf-8", "replace")[:2000]
+            logger.warning("yt-dlp failed (code=%s): %s", proc.returncode, err_text)
+            raise RuntimeError("Не удалось скачать медиа. Проверьте ссылку или попробуйте позже.")
     candidates = list(work_dir.glob("source.*"))
     if not candidates:
-        raise RuntimeError("yt-dlp finished but no file found")
+        logger.warning("yt-dlp finished but no file found in %s", work_dir)
+        raise RuntimeError("Не удалось скачать медиа. Файл не получен.")
     mp4s = [c for c in candidates if c.suffix.lower() == ".mp4"]
     result = mp4s[0] if mp4s else max(candidates, key=lambda p: p.stat().st_size)
     if result.stat().st_size > MAX_SOURCE_DOWNLOAD_MB * 1024 * 1024:
