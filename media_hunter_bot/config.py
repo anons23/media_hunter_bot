@@ -34,6 +34,7 @@ MAX_CONCURRENT = max(1, int(os.getenv("MAX_CONCURRENT", "2")))
 MAX_PLAYLIST_ITEMS = max(1, int(os.getenv("MAX_PLAYLIST_ITEMS", "50")))
 CLEANER_AGE_HOURS = max(1, int(os.getenv("CLEANER_AGE_HOURS", "12")))
 MAX_QUEUE_SIZE = max(1, int(os.getenv("MAX_QUEUE_SIZE", "100")))
+MAX_USER_QUEUE = max(1, int(os.getenv("MAX_USER_QUEUE", "10")))
 
 PREMIUM_PLANS: dict[int, int] = {
     30: 150,

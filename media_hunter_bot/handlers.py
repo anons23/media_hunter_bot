@@ -13,6 +13,7 @@ Critical fixes applied:
 from __future__ import annotations
 
 import asyncio
+import heapq
 import logging
 import os
 import secrets
@@ -51,6 +52,7 @@ from .config import (
     MAX_CONCURRENT,
     MAX_PLAYLIST_ITEMS,
     MAX_QUEUE_SIZE,
+    MAX_USER_QUEUE,
     MAX_URL_LOGICAL_MB,
     MAX_USER_UPLOAD_MB,
     MEDIA_DIR,
@@ -67,6 +69,7 @@ from .processor import (
     playlist_items,
     process_media,
     validate_logo,
+    validate_source_url,
 )
 
 router = Router()
@@ -235,6 +238,7 @@ class Engine:
         self.workers: list[asyncio.Task] = []
         self.cleaner_task: asyncio.Task | None = None
         self._queue_size = 0
+        self._user_queue_size: dict[int, int] = {}
         self._max_queue = MAX_QUEUE_SIZE
         self._lock = asyncio.Lock()
         self._proc_lock = threading.Lock()
@@ -245,29 +249,40 @@ class Engine:
         self.cleaner_task = asyncio.create_task(self._cleaner())
 
     async def add(self, uid: int, url: str | None = None, source: Path | None = None):
+        if url:
+            url = validate_source_url(url)
+        await db.aensure_user(uid)
+        premium = await db.ais_premium(uid)
         async with self._lock:
             if self._queue_size >= self._max_queue:
                 raise RuntimeError(
                     f"Очередь переполнена ({self._max_queue} задач). Попробуйте позже."
                 )
+            if self._user_queue_size.get(uid, 0) >= MAX_USER_QUEUE:
+                raise RuntimeError(
+                    f"Для одного пользователя можно поставить не более {MAX_USER_QUEUE} задач в очередь."
+                )
             self._queue_size += 1
+            self._user_queue_size[uid] = self._user_queue_size.get(uid, 0) + 1
             self.seq += 1
             seq = self.seq
-
-        await db.aensure_user(uid)
+            generation = self.gen.get(uid, 0)
         if source:
             self.uploads.setdefault(uid, set()).add(source.parent)
-        premium = await db.ais_premium(uid)
-        await self.q.put(
-            Job(
-                0 if premium else 1,
-                seq,
-                uid,
-                self.gen.get(uid, 0),
-                url,
-                source,
+        try:
+            await self.q.put(
+                Job(0 if premium else 1, seq, uid, generation, url, source)
             )
-        )
+        except Exception:
+            async with self._lock:
+                self._queue_size = max(0, self._queue_size - 1)
+                count = self._user_queue_size.get(uid, 0) - 1
+                if count > 0:
+                    self._user_queue_size[uid] = count
+                else:
+                    self._user_queue_size.pop(uid, None)
+            raise
+
     def register(self, uid: int, proc):
         with self._proc_lock:
             if proc is None:
@@ -292,6 +307,20 @@ class Engine:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.tasks.pop(uid, None)
+
+        async with self._lock:
+            queued = list(self.q._queue)
+            kept = [job for job in queued if job.uid != uid]
+            removed = len(queued) - len(kept)
+            if removed:
+                self.q._queue[:] = kept
+                heapq.heapify(self.q._queue)
+                self._queue_size = max(0, self._queue_size - removed)
+                count = self._user_queue_size.get(uid, 0) - removed
+                if count > 0:
+                    self._user_queue_size[uid] = count
+                else:
+                    self._user_queue_size.pop(uid, None)
 
         with self._proc_lock:
             procs = list(self.processes.get(uid, set()))
@@ -334,6 +363,11 @@ class Engine:
                 self.q.task_done()
                 async with self._lock:
                     self._queue_size = max(0, self._queue_size - 1)
+                    count = self._user_queue_size.get(j.uid, 0) - 1
+                    if count > 0:
+                        self._user_queue_size[j.uid] = count
+                    else:
+                        self._user_queue_size.pop(j.uid, None)
 
     async def _run_job(self, j: Job):
         if j.generation != self.gen.get(j.uid, 0):
@@ -351,20 +385,25 @@ class Engine:
 
             # ── download / resolve source ──────────────────────────────────
             if j.url:
-                items = await asyncio.to_thread(playlist_items, j.url, MAX_PLAYLIST_ITEMS)
+                safe_url = validate_source_url(j.url)
+                items = await asyncio.to_thread(playlist_items, safe_url, MAX_PLAYLIST_ITEMS)
                 if len(items) > 1:
                     premium = await db.ais_premium(j.uid)
                     async with self._lock:
-                        free = self._max_queue - self._queue_size
+                        free_global = self._max_queue - self._queue_size
+                        free_user = MAX_USER_QUEUE - self._user_queue_size.get(j.uid, 0)
+                        free = min(free_global, free_user)
                         if len(items) > free:
                             raise RuntimeError(
-                                f"Плейлист содержит {len(items)} видео, но свободно только {free} мест в очереди."
+                                f"Плейлист содержит {len(items)} видео, но свободно только {free} мест для ваших задач."
                             )
                         jobs = []
+                        generation = self.gen.get(j.uid, 0)
                         for u in items:
                             self.seq += 1
                             self._queue_size += 1
-                            jobs.append(Job(0 if premium else 1, self.seq, j.uid, self.gen.get(j.uid, 0), u, None))
+                            self._user_queue_size[j.uid] = self._user_queue_size.get(j.uid, 0) + 1
+                            jobs.append(Job(0 if premium else 1, self.seq, j.uid, generation, u, None))
                         for job in jobs:
                             await self.q.put(job)
                     await self.bot.send_message(
@@ -1114,7 +1153,6 @@ async def admin(c: CallbackQuery):
                 [B("💎 Ссылка Stars", "astars")],
                 [B("🔄 Обновить yt-dlp", "aytdlp")],
                 [B("🔄 Перезапустить бота", "abot")],
-                [B("🖥 Перезагрузить сервер", "areboot")],
                 [B("◀️ Назад", "back")],
             ]
         ),
@@ -1166,13 +1204,22 @@ async def oppvalue(m: Message, state: FSMContext):
         if len(p) != 3:
             await m.answer("Формат: ВКЛ|Название|https://t.me/канал")
             return
-        scheme = urlparse(p[2].strip()).scheme
-        host = urlparse(p[2].strip()).hostname
-        if scheme != "https" or host not in ("t.me", "telegram.me"):
-            await m.answer("❌ Нужна ссылка https://t.me/...")
+        opp_url = p[2].strip()
+        parsed = urlparse(opp_url)
+        scheme = parsed.scheme
+        host = parsed.hostname
+        path = parsed.path.strip("/")
+        if (
+            scheme != "https"
+            or host not in ("t.me", "telegram.me")
+            or not path
+            or path.startswith("+")
+            or path.startswith("joinchat/")
+        ):
+            await m.answer("❌ ОПП должна быть публичной ссылкой https://t.me/username. Приватные invite-ссылки проверить нельзя.")
             return
         await db.aset_opp(
-            slot, p[0].strip().upper() == "ВКЛ", p[1].strip(), p[2].strip()
+            slot, p[0].strip().upper() == "ВКЛ", p[1].strip(), opp_url
         )
     await state.clear()
     await m.answer("✅ ОПП сохранено.", reply_markup=menu(m.from_user.id))
@@ -1261,18 +1308,8 @@ async def abot_yes(c: CallbackQuery):
     asyncio.create_task(_exit_later())
 
 
-@router.callback_query(F.data == "areboot")
-async def areboot(c: CallbackQuery):
-    if c.from_user.id != ADMIN_ID:
-        return
-    await c.answer()
-    await c.message.edit_text("Перезагрузить VPS?", reply_markup=kb([
-        [B("⚠️ Перезагрузить", "areboot:yes"), B("❌ Отмена", "admin")]
-    ]))
 
 
-@router.callback_query(F.data == "areboot:yes")
-async def areboot_yes(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
         return
     await c.answer("VPS перезагружается", show_alert=True)
@@ -1290,20 +1327,6 @@ async def _exit_later():
     os.kill(os.getpid(), signal.SIGTERM)
 
 
-async def _reboot_later():
-    await asyncio.sleep(1)
-    for cmd in (("systemctl", "reboot"), ("/sbin/reboot",)):
-        proc = await asyncio.create_subprocess_exec(*cmd)
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=10)
-            if proc.returncode == 0:
-                return
-        except asyncio.TimeoutError:
-            try:
-                proc.terminate()
-            except ProcessLookupError:
-                pass
-    logger.error("Failed to reboot VPS: both systemctl and /sbin/reboot failed")
 
 
 @router.message(Command("paysupport"))

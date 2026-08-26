@@ -5,16 +5,18 @@ asyncio.to_thread() so the event loop is not blocked.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
+import socket
 import shutil
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import COOKIES_PATH, LOGO_DIR, MAX_WATERMARK_MB, MAX_WATERMARK_PX, MEDIA_DIR
+from .config import COOKIES_PATH, LOGO_DIR, MAX_WATERMARK_MB, MAX_WATERMARK_PX, MEDIA_DIR, MAX_URL_LOGICAL_MB
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +90,31 @@ def cleanup_logos(age_hours: int, active_logos: set[str]) -> None:
             pass
 
 
+
+def validate_source_url(url: str) -> str:
+    """Validate a downloader URL and reject local/private network targets."""
+    raw = str(url).strip()
+    from urllib.parse import urlparse
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        raise ValueError("Разрешены только HTTP/HTTPS ссылки")
+    if parsed.username or parsed.password:
+        raise ValueError("Ссылки с учётными данными запрещены")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("Некорректный URL")
+    try:
+        addresses = {ai[4][0] for ai in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)}
+    except socket.gaierror as exc:
+        raise ValueError("Не удалось разрешить адрес ссылки") from exc
+    for addr in addresses:
+        ip = ipaddress.ip_address(addr)
+        if not ip.is_global:
+            raise ValueError("Ссылки на локальные или внутренние адреса запрещены")
+    return raw
+
 def playlist_items(url: str, max_items: int) -> list[str]:
+    url = validate_source_url(url)
     cmd = [
         "yt-dlp", "--flat-playlist", "--print", "%(webpage_url)s",
         "--playlist-end", str(max_items), "--quiet", url,
@@ -106,11 +132,16 @@ def playlist_items(url: str, max_items: int) -> list[str]:
 
 
 def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> Path:
+    url = validate_source_url(url)
+    free = shutil.disk_usage(work_dir).free
+    minimum_free = max(256 * 1024 * 1024, MAX_URL_LOGICAL_MB * 4 * 1024 * 1024)
+    if free < minimum_free:
+        raise RuntimeError("Недостаточно свободного места на диске для загрузки")
     out_template = str(work_dir / "source.%(ext)s")
     cmd = [
         "yt-dlp", "--no-playlist", "--no-warnings",
         "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]/best",
-        "--merge-output-format", "mp4", "-o", out_template, "--no-progress",
+        "--merge-output-format", "mp4", "--max-filesize", f"{MAX_URL_LOGICAL_MB}M", "-o", out_template, "--no-progress",
     ]
     if COOKIES_PATH.exists():
         cmd.extend(["--cookies", str(COOKIES_PATH)])
