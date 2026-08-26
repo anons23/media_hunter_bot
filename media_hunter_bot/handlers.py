@@ -492,7 +492,7 @@ class Engine:
                         await self.bot.send_audio(ch["channel_id"], FSInputFile(cr))
                     else:
                         await self.bot.send_video(ch["channel_id"], FSInputFile(cr), caption=caption or None, supports_streaming=True)
-                                except Exception as e:
+                except Exception as e:
                     logger.exception("Autopost failed uid=%s channel=%s", j.uid, ch.get("channel_id"))
                     safe = user_facing_error(e)
                     try:
