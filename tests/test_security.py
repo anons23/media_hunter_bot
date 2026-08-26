@@ -1,0 +1,89 @@
+import asyncio
+import ipaddress
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+from media_hunter_bot import db
+from media_hunter_bot import handlers
+from media_hunter_bot import processor
+
+
+class SecurityRegressionTests(unittest.TestCase):
+    def test_source_url_rejects_non_http(self):
+        for url in ("file:///etc/passwd", "ftp://example.com/file", "javascript:alert(1)"):
+            with self.assertRaises(ValueError):
+                processor.validate_source_url(url)
+
+    def test_source_url_rejects_loopback_without_dns(self):
+        with patch.object(processor.socket, "getaddrinfo", return_value=[(None, None, None, None, ("127.0.0.1", 0))]):
+            with self.assertRaises(ValueError):
+                processor.validate_source_url("http://localhost/test")
+
+    def test_source_url_rejects_private_address(self):
+        with patch.object(processor.socket, "getaddrinfo", return_value=[(None, None, None, None, ("10.0.0.1", 0))]):
+            with self.assertRaises(ValueError):
+                processor.validate_source_url("https://internal.example/test")
+
+    def test_source_url_allows_public_address(self):
+        with patch.object(processor.socket, "getaddrinfo", return_value=[(None, None, None, None, ("93.184.216.34", 0))]):
+            self.assertEqual(
+                processor.validate_source_url("https://example.com/video"),
+                "https://example.com/video",
+            )
+
+    def test_logo_path_is_confined_to_logo_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            logo = root / "logo.png"
+            logo.write_bytes(b"test")
+            outside = root.parent / "outside-logo.png"
+            outside.write_bytes(b"test")
+            try:
+                with patch.object(processor, "LOGO_DIR", root):
+                    self.assertEqual(processor._logo_path({"logo": str(logo)}), logo.resolve())
+                    self.assertIsNone(processor._logo_path({"logo": str(outside)}))
+                    self.assertIsNone(processor._logo_path({"logo": str(root / ".." / outside.name)}))
+            finally:
+                outside.unlink(missing_ok=True)
+
+    def test_restart_removes_queued_jobs_and_balances_task_done(self):
+        async def run():
+            engine = handlers.Engine(None)
+            engine._max_queue = 10
+            engine._queue_size = 2
+            engine._user_queue_size[123] = 2
+            engine.gen[123] = 0
+            engine.seq = 2
+            await engine.q.put(handlers.Job(1, 1, 123, 0, "https://example.com/1", None))
+            await engine.q.put(handlers.Job(1, 2, 123, 0, "https://example.com/2", None))
+            await engine.restart(123)
+            self.assertEqual(engine.q.qsize(), 0)
+            self.assertEqual(engine._queue_size, 0)
+            self.assertEqual(engine._user_queue_size.get(123, 0), 0)
+            await asyncio.wait_for(engine.q.join(), timeout=1)
+
+        asyncio.run(run())
+
+    def test_existing_private_opp_is_not_silently_satisfied(self):
+        async def run():
+            rows = [{"slot": 1, "url": "https://t.me/+privatehash", "title": "Private"}]
+            bot = AsyncMock()
+            with patch.object(db, "aactive_opp", new=AsyncMock(return_value=rows)):
+                missing, keyboard = await handlers.opp_check(bot, 123)
+            self.assertTrue(missing)
+            self.assertTrue(keyboard)
+            bot.get_chat_member.assert_not_awaited()
+
+        asyncio.run(run())
+
+    def test_reboot_handler_removed(self):
+        source = Path(handlers.__file__).read_text(encoding="utf-8")
+        self.assertNotIn('"areboot"', source)
+        self.assertNotIn("async def areboot", source)
+        self.assertNotIn("def _reboot_later", source)
+
+
+if __name__ == "__main__":
+    unittest.main()
