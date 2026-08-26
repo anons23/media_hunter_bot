@@ -201,7 +201,9 @@ async def opp_check(bot: Bot, uid: int) -> tuple[bool, list[list[InlineKeyboardB
             except Exception:
                 ok = False
         if target is None:
-            logger.warning("OPP slot %s uses a private invite link; membership cannot be verified", r["slot"])
+            logger.error("OPP slot %s uses an unverifiable private invite link; blocking access until admin fixes it", r["slot"])
+            missing = True
+            rows.append([B(f"⚠️ ОПП {r['slot']} требует настройки", url=r["url"])])
             continue
         if not ok:
             missing = True
@@ -315,6 +317,8 @@ class Engine:
             if removed:
                 self.q._queue[:] = kept
                 heapq.heapify(self.q._queue)
+                for _ in range(removed):
+                    self.q.task_done()
                 self._queue_size = max(0, self._queue_size - removed)
                 count = self._user_queue_size.get(uid, 0) - removed
                 if count > 0:

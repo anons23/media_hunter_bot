@@ -230,10 +230,16 @@ def _build_text_filter(wm: dict[str, Any], work_dir: Path) -> str | None:
 
 
 def _logo_path(wm: dict[str, Any]) -> Path | None:
-    raw = str(wm.get("logo", ""))
+    raw = str(wm.get("logo", "")).strip()
     if not raw:
         return None
+    root = LOGO_DIR.resolve()
     p = Path(raw).resolve()
+    try:
+        p.relative_to(root)
+    except ValueError:
+        logger.warning("Rejected logo path outside LOGO_DIR: %s", raw)
+        return None
     if not p.exists() or not p.is_file():
         return None
     return p
