@@ -35,16 +35,13 @@ MAX_SOURCE_DOWNLOAD_MB = max(
     int(os.getenv("MAX_SOURCE_DOWNLOAD_MB", "1536")),
 )
 MAX_URL_LOGICAL_MB = MAX_UNIQUE_SIZE_MB
-# Direct user uploads follow the same policy as URL downloads. This is an
-# absolute safety limit, not the unique-processing threshold.
 MAX_USER_UPLOAD_MB = max(
     MAX_SOURCE_DOWNLOAD_MB,
-    int(os.getenv("MAX_USER_UPLOAD_MB", str(MAX_SOURCE_DOWNLOAD_MB)),
+    int(os.getenv("MAX_USER_UPLOAD_MB", str(MAX_SOURCE_DOWNLOAD_MB))),
 )
 MAX_WATERMARK_MB = int(os.getenv("MAX_WATERMARK_MB", "5"))
 MAX_WATERMARK_PX = int(os.getenv("MAX_WATERMARK_PX", "2000"))
 
-# One CPU VPS: keep heavy media processing serialized by default.
 MAX_CONCURRENT = max(1, int(os.getenv("MAX_CONCURRENT", "1")))
 MAX_PLAYLIST_ITEMS = max(1, int(os.getenv("MAX_PLAYLIST_ITEMS", "50")))
 CLEANER_AGE_HOURS = max(1, int(os.getenv("CLEANER_AGE_HOURS", "12")))
