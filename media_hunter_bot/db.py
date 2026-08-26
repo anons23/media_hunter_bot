@@ -43,53 +43,15 @@ def _db():
 
 
 _INIT_SQL = """
-CREATE TABLE IF NOT EXISTS users(
-    user_id INTEGER PRIMARY KEY,
-    username TEXT,
-    first_name TEXT,
-    premium_until TEXT,
-    permanent_premium INTEGER NOT NULL DEFAULT 0,
-    format TEXT NOT NULL DEFAULT 'video',
-    watermark TEXT NOT NULL DEFAULT '{}',
-    referrals INTEGER NOT NULL DEFAULT 0,
-    referred_by INTEGER,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS channels(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    channel_id INTEGER NOT NULL,
-    title TEXT,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    watermark TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL,
-    UNIQUE(user_id, channel_id)
-);
-CREATE TABLE IF NOT EXISTS opp(
-    slot INTEGER PRIMARY KEY,
-    enabled INTEGER NOT NULL DEFAULT 0,
-    title TEXT NOT NULL DEFAULT '',
-    url TEXT NOT NULL DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS settings(
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS payments(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    payload TEXT UNIQUE,
-    days INTEGER NOT NULL,
-    stars INTEGER NOT NULL,
-    telegram_charge_id TEXT,
-    created_at TEXT NOT NULL
-);
+CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, premium_until TEXT, permanent_premium INTEGER NOT NULL DEFAULT 0, format TEXT NOT NULL DEFAULT 'video', watermark TEXT NOT NULL DEFAULT '{}', referrals INTEGER NOT NULL DEFAULT 0, referred_by INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS channels(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, title TEXT, enabled INTEGER NOT NULL DEFAULT 1, watermark TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, UNIQUE(user_id, channel_id));
+CREATE TABLE IF NOT EXISTS opp(slot INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS payments(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, payload TEXT UNIQUE, days INTEGER NOT NULL, stars INTEGER NOT NULL, telegram_charge_id TEXT, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_channels_user ON channels(user_id);
 CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id);
 CREATE INDEX IF NOT EXISTS idx_users_premium ON users(premium_until);
 """
-
 _DEFAULT_SETTINGS = {"stars_link": "", "ad_text": "", "ad_button": "", "ad_url": ""}
 
 
@@ -99,10 +61,8 @@ def init_db() -> None:
         c.executescript(_INIT_SQL)
         c.execute("DELETE FROM payments WHERE id NOT IN (SELECT MIN(id) FROM payments WHERE telegram_charge_id IS NOT NULL GROUP BY telegram_charge_id) AND telegram_charge_id IS NOT NULL")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_telegram_charge_id ON payments(telegram_charge_id) WHERE telegram_charge_id IS NOT NULL")
-        for k, v in _DEFAULT_SETTINGS.items():
-            c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
-        for slot in (1, 2, 3):
-            c.execute("INSERT OR IGNORE INTO opp(slot) VALUES(?)", (slot,))
+        for k, v in _DEFAULT_SETTINGS.items(): c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
+        for slot in (1, 2, 3): c.execute("INSERT OR IGNORE INTO opp(slot) VALUES(?)", (slot,))
         if ADMIN_ID:
             _ensure_user_locked(c, ADMIN_ID, None, None)
             c.execute("UPDATE users SET permanent_premium=1 WHERE user_id=?", (ADMIN_ID,))
@@ -116,30 +76,17 @@ def _ensure_user_locked(c: sqlite3.Connection, user_id: int, username: str | Non
 
 
 def ensure_user(user_id: int, username: str | None = None, first_name: str | None = None) -> None:
-    with _db() as c:
-        _ensure_user_locked(c, user_id, username, first_name)
+    with _db() as c: _ensure_user_locked(c, user_id, username, first_name)
 
 
 def apply_referral(user_id: int, referrer_id: int) -> bool:
-    if user_id == referrer_id:
-        return False
+    if user_id == referrer_id: return False
     with _db() as c:
-        referrer = c.execute(
-            "SELECT user_id FROM users WHERE user_id=?", (referrer_id,)
-        ).fetchone()
-        if not referrer:
-            return False
-        c.execute(
-            "UPDATE users SET referred_by=?, updated_at=? "
-            "WHERE user_id=? AND referred_by IS NULL",
-            (referrer_id, _now(), user_id),
-        )
-        if c.rowcount != 1:
-            return False
-        c.execute(
-            "UPDATE users SET referrals=referrals+1, updated_at=? WHERE user_id=?",
-            (_now(), referrer_id),
-        )
+        referrer = c.execute("SELECT user_id FROM users WHERE user_id=?", (referrer_id,)).fetchone()
+        if not referrer: return False
+        c.execute("UPDATE users SET referred_by=?, updated_at=? WHERE user_id=? AND referred_by IS NULL", (referrer_id, _now(), user_id))
+        if c.rowcount != 1: return False
+        c.execute("UPDATE users SET referrals=referrals+1, updated_at=? WHERE user_id=?", (_now(), referrer_id))
         return True
 
 
@@ -149,23 +96,26 @@ def get_referrals(user_id: int) -> int:
         return int(r[0]) if r else 0
 
 
+def _wm_dict(raw: str | None) -> dict[str, Any]:
+    try:
+        value = json.loads(raw or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def active_logo_paths() -> set[str]:
     active: set[str] = set()
     with _db() as c:
         rows = c.execute("SELECT watermark FROM users WHERE watermark IS NOT NULL UNION ALL SELECT watermark FROM channels WHERE watermark IS NOT NULL").fetchall()
     for row in rows:
-        try:
-            wm = json.loads(row[0] or "{}")
-        except (TypeError, json.JSONDecodeError):
-            continue
-        if wm.get("type") == "image" and wm.get("logo"):
-            active.add(str(wm["logo"]))
+        wm = _wm_dict(row[0])
+        if wm.get("type") == "image" and wm.get("logo"): active.add(str(wm["logo"]))
     return active
 
 
 def get_user(user_id: int) -> sqlite3.Row | None:
-    with _db() as c:
-        return c.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
+    with _db() as c: return c.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
 
 
 def set_format(user_id: int, fmt: str) -> None:
@@ -175,7 +125,7 @@ def set_format(user_id: int, fmt: str) -> None:
 def get_user_watermark(user_id: int) -> dict[str, Any]:
     with _db() as c:
         r = c.execute("SELECT watermark FROM users WHERE user_id=?", (user_id,)).fetchone()
-        return json.loads(r[0] or "{}") if r else {}
+        return _wm_dict(r[0]) if r else {}
 
 
 def set_user_watermark(user_id: int, value: dict[str, Any]) -> None:
@@ -207,21 +157,18 @@ def add_channel(user_id: int, channel_id: int, title: str) -> None:
     with _db() as c:
         existing = c.execute("SELECT id FROM channels WHERE user_id=? AND channel_id=?", (user_id, channel_id)).fetchone()
         if existing:
-            c.execute("UPDATE channels SET title=? WHERE user_id=? AND channel_id=?", (title, user_id, channel_id))
-            return
+            c.execute("UPDATE channels SET title=? WHERE user_id=? AND channel_id=?", (title, user_id, channel_id)); return
         premium_row = c.execute("SELECT premium_until, permanent_premium FROM users WHERE user_id=?", (user_id,)).fetchone()
         premium = False
         if premium_row:
-            if premium_row["permanent_premium"]:
-                premium = True
+            if premium_row["permanent_premium"]: premium = True
             else:
                 until = _parse_premium_until(premium_row["premium_until"])
                 premium = until is not None and datetime.now(timezone.utc) < until
         max_channels = 3 if premium else 1
         count = c.execute("SELECT COUNT(*) FROM channels WHERE user_id=?", (user_id,)).fetchone()[0]
         if count >= max_channels:
-            if premium:
-                raise ValueError("Максимум 3 канала для Premium")
+            if premium: raise ValueError("Максимум 3 канала для Premium")
             raise ValueError("Для бесплатного тарифа доступен только 1 канал. Подключите Premium для 3 каналов.")
         c.execute("INSERT INTO channels(user_id,channel_id,title,created_at) VALUES(?,?,?,?)", (user_id, channel_id, title, _now()))
 
@@ -237,7 +184,7 @@ def set_channel_enabled(user_id: int, channel_id: int, enabled: bool) -> None:
 def get_channel_watermark(channel_id: int, user_id: int) -> dict[str, Any]:
     with _db() as c:
         r = c.execute("SELECT watermark FROM channels WHERE channel_id=? AND user_id=?", (channel_id, user_id)).fetchone()
-        return json.loads(r[0] or "{}") if r else {}
+        return _wm_dict(r[0]) if r else {}
 
 
 def set_channel_watermark(channel_id: int, user_id: int, value: dict[str, Any]) -> None:
@@ -257,13 +204,10 @@ def set_setting(key: str, value: str) -> None:
 def get_opp() -> list[sqlite3.Row]:
     with _db() as c: return c.execute("SELECT * FROM opp ORDER BY slot").fetchall()
 
-
 def set_opp(slot: int, enabled: bool, title: str, url: str) -> None:
     with _db() as c: c.execute("UPDATE opp SET enabled=?,title=?,url=? WHERE slot=?", (int(enabled), title, url, slot))
 
-
 def active_opp() -> list[sqlite3.Row]: return [r for r in get_opp() if r["enabled"] and r["url"]]
-
 
 def save_payment(user_id: int, payload: str, days: int, stars: int, charge_id: str) -> bool:
     with _db() as c:
