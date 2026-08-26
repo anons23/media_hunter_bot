@@ -124,12 +124,22 @@ def apply_referral(user_id: int, referrer_id: int) -> bool:
     if user_id == referrer_id:
         return False
     with _db() as c:
-        target = c.execute("SELECT referred_by FROM users WHERE user_id=?", (user_id,)).fetchone()
-        referrer = c.execute("SELECT user_id FROM users WHERE user_id=?", (referrer_id,)).fetchone()
-        if not target or not referrer or target["referred_by"] is not None:
+        referrer = c.execute(
+            "SELECT user_id FROM users WHERE user_id=?", (referrer_id,)
+        ).fetchone()
+        if not referrer:
             return False
-        c.execute("UPDATE users SET referred_by=?, updated_at=? WHERE user_id=?", (referrer_id, _now(), user_id))
-        c.execute("UPDATE users SET referrals=referrals+1, updated_at=? WHERE user_id=?", (_now(), referrer_id))
+        c.execute(
+            "UPDATE users SET referred_by=?, updated_at=? "
+            "WHERE user_id=? AND referred_by IS NULL",
+            (referrer_id, _now(), user_id),
+        )
+        if c.rowcount != 1:
+            return False
+        c.execute(
+            "UPDATE users SET referrals=referrals+1, updated_at=? WHERE user_id=?",
+            (_now(), referrer_id),
+        )
         return True
 
 
