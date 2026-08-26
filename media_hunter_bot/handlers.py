@@ -406,29 +406,86 @@ class Engine:
                 raise RuntimeError("Исходный файл не найден")
             _, size = await asyncio.to_thread(ffprobe, source)
             hard_limit = MAX_SOURCE_DOWNLOAD_MB * 1024 * 1024
-            unique_limit = MAX_URL_LOGICAL_MB * 1024 * 1024
             if size > hard_limit:
                 raise RuntimeError(f"Исходный файл превышает абсолютный лимит {MAX_SOURCE_DOWNLOAD_MB} МБ")
             fmt = user["format"]
             audio_only = fmt == "mp3"
             oversized = False
             watermark = await db.aget_user_watermark(j.uid)
-            if (not audio_only) and size > unique_limit:
+
+            soft_unique_limit = SOFT_UNIQUE_SIZE_MB * 1024 * 1024
+            max_unique_limit = MAX_UNIQUE_SIZE_MB * 1024 * 1024
+            send_limit = MAX_SEND_MB * 1024 * 1024
+
+            if audio_only:
+                # MP3 обрабатывается по существующей аудио-логике.
+                result = await asyncio.to_thread(
+                    process_media,
+                    source,
+                    work,
+                    watermark,
+                    audio_only=True,
+                    compress=False,
+                    register=register,
+                )
+
+            elif size > max_unique_limit:
+                # >100 МБ и <= абсолютного лимита:
+                # отправляем оригинал без уникализации и сжатия.
                 result = source
                 oversized = True
-            else:
-                result = await asyncio.to_thread(process_media, source, work, watermark, audio_only=audio_only, compress=False, register=register)
+
+            elif size > soft_unique_limit:
+                # >80 МБ и <=100 МБ:
+                # уникализация + обязательное сжатие.
+                result = await asyncio.to_thread(
+                    process_media,
+                    source,
+                    work,
+                    watermark,
+                    audio_only=False,
+                    compress=True,
+                    register=register,
+                )
+
                 result_size = (await asyncio.to_thread(result.stat)).st_size
-                send_limit = MAX_SEND_MB * 1024 * 1024
-                if not audio_only and result_size > send_limit:
-                    result = await asyncio.to_thread(process_media, source, work, watermark, audio_only=False, compress=True, register=register)
-                    result_size = (await asyncio.to_thread(result.stat)).st_size
-                    if result_size > send_limit:
-                        raise RuntimeError(f"После сжатия файл всё ещё превышает лимит отправки {MAX_SEND_MB} МБ")
+
+                # После сжатия файл должен быть не больше soft-лимита.
+                if result_size > soft_unique_limit:
+                    raise RuntimeError(
+                        f"После сжатия файл всё ещё превышает "
+                        f"целевой лимит {SOFT_UNIQUE_SIZE_MB} МБ"
+                    )
+
+            else:
+                # <=80 МБ:
+                # только уникализация, без сжатия.
+                result = await asyncio.to_thread(
+                    process_media,
+                    source,
+                    work,
+                    watermark,
+                    audio_only=False,
+                    compress=False,
+                    register=register,
+                )
+
+                result_size = (await asyncio.to_thread(result.stat)).st_size
+
+                # Защита от неожиданного увеличения результата.
+                if result_size > send_limit:
+                    raise RuntimeError(
+                        f"Результат уникализации превышает "
+                        f"лимит отправки {MAX_SEND_MB} МБ"
+                    )
+
             meta = await asyncio.to_thread(metadata, source)
             caption = str(meta.get("description") or meta.get("title") or "")[:900]
             if oversized:
-                caption += f"\n\nℹ️ Файл больше {MAX_URL_LOGICAL_MB} МБ, поэтому отправлен оригинал без уникализации."
+                caption += (
+    f"\n\nℹ️ Файл больше {MAX_UNIQUE_SIZE_MB} МБ, "
+    "поэтому отправлен оригинал без уникализации."
+)
             await self._send_private(j.uid, result, caption)
             for ch in await db.alist_channels(j.uid):
                 if not ch["enabled"]:
