@@ -33,9 +33,13 @@ class SecurityRegressionTests(unittest.TestCase):
                 "https://example.com/video",
             )
 
-    def test_source_limit_is_above_final_telegram_limit(self):
-        self.assertEqual(config.MAX_URL_LOGICAL_MB, 49)
-        self.assertGreaterEqual(config.MAX_SOURCE_DOWNLOAD_MB, config.MAX_URL_LOGICAL_MB)
+    def test_media_policy_thresholds(self):
+        self.assertEqual(config.SOFT_UNIQUE_SIZE_MB, 80)
+        self.assertEqual(config.MAX_UNIQUE_SIZE_MB, 100)
+        self.assertEqual(config.MAX_URL_LOGICAL_MB, 100)
+        self.assertEqual(config.MAX_SOURCE_DOWNLOAD_MB, 1536)
+        self.assertEqual(config.MAX_USER_UPLOAD_MB, 1536)
+        self.assertGreater(config.MAX_SOURCE_DOWNLOAD_MB, config.MAX_UNIQUE_SIZE_MB)
 
     def test_logo_path_is_confined_to_logo_dir(self):
         with tempfile.TemporaryDirectory() as td:
@@ -82,11 +86,26 @@ class SecurityRegressionTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_reboot_handler_removed(self):
+    def test_reboot_handler_removed_completely(self):
         source = Path(handlers.__file__).read_text(encoding="utf-8")
-        self.assertNotIn('"areboot"', source)
-        self.assertNotIn("async def areboot", source)
-        self.assertNotIn("def _reboot_later", source)
+        for forbidden in (
+            '"areboot"',
+            "async def areboot",
+            "def _reboot_later",
+            "_reboot_later()",
+            "VPS перезагружается",
+        ):
+            self.assertNotIn(forbidden, source)
+
+    def test_referral_update_is_guarded_by_referred_by_null(self):
+        source = Path(db.__file__).read_text(encoding="utf-8")
+        self.assertIn("AND referred_by IS NULL", source)
+        self.assertIn("if c.rowcount != 1:", source)
+
+    def test_playlist_items_are_validated_before_queueing(self):
+        source = Path(handlers.__file__).read_text(encoding="utf-8")
+        self.assertIn("safe_item_url = validate_source_url(u)", source)
+        self.assertIn("Skipping unsafe playlist item", source)
 
 
 if __name__ == "__main__":
