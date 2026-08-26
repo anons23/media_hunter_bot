@@ -1,0 +1,65 @@
+name: Correct security regression
+on:
+  push:
+    branches: [Media_hanter-v3-security]
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: "!contains(github.event.head_commit.message, '[security-regression]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: Media_hanter-v3-security
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Correct source-size guard and playlist accounting
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          # Keep 49 MB as the final Telegram/output limit, but allow larger sources
+          # so the existing FFmpeg compression feature can actually work.
+          p = Path('media_hunter_bot/config.py')
+          s = p.read_text(encoding='utf-8')
+          anchor = 'MAX_URL_LOGICAL_MB = int(os.getenv("MAX_URL_LOGICAL_MB", "49"))\n'
+          if 'MAX_SOURCE_DOWNLOAD_MB' not in s:
+              if anchor not in s:
+                  raise SystemExit('MAX_URL_LOGICAL_MB anchor not found')
+              s = s.replace(anchor, anchor + 'MAX_SOURCE_DOWNLOAD_MB = max(MAX_URL_LOGICAL_MB, int(os.getenv("MAX_SOURCE_DOWNLOAD_MB", "200")))\n', 1)
+          p.write_text(s, encoding='utf-8')
+
+          p = Path('media_hunter_bot/processor.py')
+          s = p.read_text(encoding='utf-8')
+          old_import = 'from .config import COOKIES_PATH, LOGO_DIR, MAX_WATERMARK_MB, MAX_WATERMARK_PX, MEDIA_DIR, MAX_URL_LOGICAL_MB\n'
+          new_import = 'from .config import COOKIES_PATH, LOGO_DIR, MAX_WATERMARK_MB, MAX_WATERMARK_PX, MEDIA_DIR, MAX_URL_LOGICAL_MB, MAX_SOURCE_DOWNLOAD_MB\n'
+          if old_import in s:
+              s = s.replace(old_import, new_import, 1)
+          if '"--max-filesize", f"{MAX_SOURCE_DOWNLOAD_MB}M"' not in s:
+              s = s.replace('"--max-filesize", f"{MAX_URL_LOGICAL_MB}M"', '"--max-filesize", f"{MAX_SOURCE_DOWNLOAD_MB}M"', 1)
+          s = s.replace('minimum_free = max(256 * 1024 * 1024, MAX_URL_LOGICAL_MB * 4 * 1024 * 1024)', 'minimum_free = max(512 * 1024 * 1024, MAX_SOURCE_DOWNLOAD_MB * 3 * 1024 * 1024)', 1)
+          p.write_text(s, encoding='utf-8')
+
+          # A playlist job is replaced by its expanded children; do not count the
+          # currently-running playlist placeholder against the expansion capacity.
+          p = Path('media_hunter_bot/handlers.py')
+          s = p.read_text(encoding='utf-8')
+          old = '''                        free_global = self._max_queue - self._queue_size\n                        free_user = MAX_USER_QUEUE - self._user_queue_size.get(j.uid, 0)\n                        free = min(free_global, free_user)\n'''
+          new = '''                        current_global = 1\n                        current_user = 1\n                        free_global = self._max_queue - self._queue_size + current_global\n                        free_user = MAX_USER_QUEUE - self._user_queue_size.get(j.uid, 0) + current_user\n                        free = min(free_global, free_user)\n'''
+          if old in s:
+              s = s.replace(old, new, 1)
+          p.write_text(s, encoding='utf-8')
+          PY
+          python -m py_compile media_hunter_bot/processor.py media_hunter_bot/handlers.py media_hunter_bot/db.py media_hunter_bot/config.py main.py
+          grep -R "MAX_SOURCE_DOWNLOAD_MB\|--max-filesize" -n media_hunter_bot/processor.py media_hunter_bot/config.py
+      - name: Commit and remove workflow
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add media_hunter_bot/config.py media_hunter_bot/processor.py media_hunter_bot/handlers.py .github/workflows/fix-security-regression.yml
+          git rm -f .github/workflows/fix-security-regression.yml
+          git commit -m 'fix(v3): preserve compression for larger sources [security-regression]'
+          git push origin HEAD:Media_hanter-v3-security
