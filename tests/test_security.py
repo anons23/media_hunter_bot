@@ -74,6 +74,18 @@ class SecurityRegressionTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_worker_cancellation_while_waiting_does_not_call_task_done(self):
+        async def run():
+            engine = handlers.Engine(None)
+            worker = asyncio.create_task(engine._worker())
+            await asyncio.sleep(0)
+            worker.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await worker
+            self.assertEqual(engine.q._unfinished_tasks, 0)
+
+        asyncio.run(run())
+
     def test_existing_private_opp_is_not_silently_satisfied(self):
         async def run():
             rows = [{"slot": 1, "url": "https://t.me/+privatehash", "title": "Private"}]
@@ -106,6 +118,10 @@ class SecurityRegressionTests(unittest.TestCase):
         source = Path(handlers.__file__).read_text(encoding="utf-8")
         self.assertIn("safe_item_url = validate_source_url(u)", source)
         self.assertIn("Skipping unsafe playlist item", source)
+
+    def test_logical_limit_is_explicitly_configurable(self):
+        source = Path(config.__file__).read_text(encoding="utf-8")
+        self.assertIn('os.getenv("MAX_URL_LOGICAL_MB", str(MAX_UNIQUE_SIZE_MB))', source)
 
 
 if __name__ == "__main__":
