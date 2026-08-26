@@ -14,7 +14,6 @@ Critical fixes applied:
 from __future__ import annotations
 
 import asyncio
-import heapq
 import logging
 import os
 import secrets
@@ -55,6 +54,7 @@ from .config import (
     MAX_QUEUE_SIZE,
     MAX_USER_QUEUE,
     MAX_URL_LOGICAL_MB,
+    MAX_SEND_MB,
     MAX_SOURCE_DOWNLOAD_MB,
     MAX_USER_UPLOAD_MB,
     MEDIA_DIR,
@@ -93,7 +93,6 @@ class ThrottlingMiddleware(BaseMiddleware):
             uid = event.from_user.id
         elif isinstance(event, CallbackQuery) and event.from_user:
             uid = event.from_user.id
-
         if uid is not None:
             now = asyncio.get_running_loop().time()
             last = self._last.get(uid, 0)
@@ -104,13 +103,11 @@ class ThrottlingMiddleware(BaseMiddleware):
                     await event.answer("⏳ Слишком быстро, подождите секунду.")
                 return None
             self._last[uid] = now
-
             self._req_count += 1
             if self._req_count >= self._cleanup_every:
                 self._req_count = 0
                 cutoff = now - self.rate * 3
                 self._last = {k: v for k, v in self._last.items() if v > cutoff}
-
         return await handler(event, data)
 
 
@@ -148,14 +145,12 @@ def menu(uid: int) -> InlineKeyboardMarkup:
 
 
 def premium_menu() -> InlineKeyboardMarkup:
-    return kb(
-        [
-            [B("⭐ 1 месяц — 150", "buy:30"), B("⭐ 2 месяца — 285", "buy:60")],
-            [B("⭐ 3 месяца — 405", "buy:90"), B("⭐ 6 месяцев — 720", "buy:180")],
-            [B("💎 Купить Stars", "stars")],
-            [B("◀️ Назад", "back")],
-        ]
-    )
+    return kb([
+        [B("⭐ 1 месяц — 150", "buy:30"), B("⭐ 2 месяца — 285", "buy:60")],
+        [B("⭐ 3 месяца — 405", "buy:90"), B("⭐ 6 месяцев — 720", "buy:180")],
+        [B("💎 Купить Stars", "stars")],
+        [B("◀️ Назад", "back")],
+    ])
 
 
 def _resolve_opp_target(url: str) -> str | int | None:
@@ -177,9 +172,7 @@ async def opp_check(bot: Bot, uid: int) -> tuple[bool, list[list[InlineKeyboardB
         if target is not None:
             try:
                 m = await bot.get_chat_member(target, uid)
-                ok = m.status in ("member", "administrator", "creator") or (
-                    m.status == "restricted" and getattr(m, "is_member", False)
-                )
+                ok = m.status in ("member", "administrator", "creator") or (m.status == "restricted" and getattr(m, "is_member", False))
             except Exception:
                 ok = False
         if target is None:
@@ -222,6 +215,7 @@ class Engine:
         self._max_queue = MAX_QUEUE_SIZE
         self._lock = asyncio.Lock()
         self._proc_lock = threading.Lock()
+        self._restarting: set[int] = set()
 
     async def start(self):
         for _ in range(MAX_CONCURRENT):
@@ -234,6 +228,8 @@ class Engine:
         await db.aensure_user(uid)
         premium = await db.ais_premium(uid)
         async with self._lock:
+            if uid in self._restarting:
+                raise RuntimeError("Ваши задачи сейчас перезапускаются. Попробуйте снова через несколько секунд.")
             if self._queue_size >= self._max_queue:
                 raise RuntimeError(f"Очередь переполнена ({self._max_queue} задач). Попробуйте позже.")
             if self._user_queue_size.get(uid, 0) >= MAX_USER_QUEUE:
@@ -244,7 +240,10 @@ class Engine:
             seq = self.seq
             generation = self.gen.get(uid, 0)
         if source:
-            self.uploads.setdefault(uid, set()).add(source.parent)
+            async with self._lock:
+                if uid in self._restarting:
+                    raise RuntimeError("Ваши задачи сейчас перезапускаются. Попробуйте снова через несколько секунд.")
+                self.uploads.setdefault(uid, set()).add(source.parent)
         try:
             await self.q.put(Job(0 if premium else 1, seq, uid, generation, url, source))
         except Exception:
@@ -257,12 +256,19 @@ class Engine:
                     self._user_queue_size.pop(uid, None)
             raise
 
-    def register(self, uid: int, proc):
+    def register(self, uid: int, proc, generation: int | None = None):
         with self._proc_lock:
             if proc is None:
                 for p in list(self.processes.get(uid, set())):
                     if getattr(p, "returncode", None) is not None:
                         self.processes[uid].discard(p)
+                return
+            if generation is not None and generation != self.gen.get(uid, 0):
+                try:
+                    if getattr(proc, "returncode", None) is None:
+                        proc.terminate()
+                except Exception:
+                    pass
                 return
             self.processes.setdefault(uid, set()).add(proc)
 
@@ -273,7 +279,9 @@ class Engine:
         return paths
 
     async def restart(self, uid: int):
-        self.gen[uid] = self.gen.get(uid, 0) + 1
+        async with self._lock:
+            self.gen[uid] = self.gen.get(uid, 0) + 1
+            self._restarting.add(uid)
         tasks = list(self.tasks.get(uid, set()))
         for t in tasks:
             if not t.done():
@@ -281,23 +289,26 @@ class Engine:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.tasks.pop(uid, None)
-
         async with self._lock:
-            queued = list(self.q._queue)
+            queued: list[Job] = []
+            while True:
+                try:
+                    queued.append(self.q.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
             kept = [job for job in queued if job.uid != uid]
             removed = len(queued) - len(kept)
+            for job in kept:
+                await self.q.put(job)
+            for _ in range(removed):
+                self.q.task_done()
             if removed:
-                self.q._queue[:] = kept
-                heapq.heapify(self.q._queue)
-                for _ in range(removed):
-                    self.q.task_done()
                 self._queue_size = max(0, self._queue_size - removed)
                 count = self._user_queue_size.get(uid, 0) - removed
                 if count > 0:
                     self._user_queue_size[uid] = count
                 else:
                     self._user_queue_size.pop(uid, None)
-
         with self._proc_lock:
             procs = list(self.processes.get(uid, set()))
             self.processes.pop(uid, None)
@@ -309,11 +320,13 @@ class Engine:
                         await asyncio.wait_for(asyncio.to_thread(p.wait), timeout=5)
                     except asyncio.TimeoutError:
                         p.kill()
+                        await asyncio.to_thread(p.wait)
             except Exception:
                 pass
-
         for root in list(self.uploads.pop(uid, set())):
             await asyncio.to_thread(shutil.rmtree, root, ignore_errors=True)
+        async with self._lock:
+            self._restarting.discard(uid)
 
     async def _worker(self):
         while True:
@@ -351,7 +364,7 @@ class Engine:
         work = MEDIA_DIR / f"{j.uid}_{uuid.uuid4().hex}"
         work.mkdir(parents=True, exist_ok=True)
         self.active_work_dirs.add(str(work))
-        register = lambda p=None: self.register(j.uid, p)
+        register = lambda p=None: self.register(j.uid, p, j.generation)
         try:
             user = await db.aget_user(j.uid)
             if not user:
@@ -398,19 +411,20 @@ class Engine:
                 raise RuntimeError(f"Исходный файл превышает абсолютный лимит {MAX_SOURCE_DOWNLOAD_MB} МБ")
             fmt = user["format"]
             audio_only = fmt == "mp3"
-            oversized = (not audio_only) and size > unique_limit
+            oversized = False
             watermark = await db.aget_user_watermark(j.uid)
-            if oversized:
+            if (not audio_only) and size > unique_limit:
                 result = source
+                oversized = True
             else:
                 result = await asyncio.to_thread(process_media, source, work, watermark, audio_only=audio_only, compress=False, register=register)
                 result_size = (await asyncio.to_thread(result.stat)).st_size
-                if not audio_only and result_size > unique_limit:
+                send_limit = MAX_SEND_MB * 1024 * 1024
+                if not audio_only and result_size > send_limit:
                     result = await asyncio.to_thread(process_media, source, work, watermark, audio_only=False, compress=True, register=register)
                     result_size = (await asyncio.to_thread(result.stat)).st_size
-                    if result_size > unique_limit:
-                        result = source
-                        oversized = True
+                    if result_size > send_limit:
+                        raise RuntimeError(f"После сжатия файл всё ещё превышает лимит отправки {MAX_SEND_MB} МБ")
             meta = await asyncio.to_thread(metadata, source)
             caption = str(meta.get("description") or meta.get("title") or "")[:900]
             if oversized:
@@ -426,10 +440,10 @@ class Engine:
                         channel_wm = await db.aget_channel_watermark(ch["channel_id"], j.uid)
                         cr = await asyncio.to_thread(process_media, source, work, channel_wm, audio_only=False, compress=False, register=register)
                         cr_size = (await asyncio.to_thread(cr.stat)).st_size
-                        if cr_size > unique_limit:
+                        if cr_size > MAX_SEND_MB * 1024 * 1024:
                             cr = await asyncio.to_thread(process_media, source, work, channel_wm, audio_only=False, compress=True, register=register)
-                            if (await asyncio.to_thread(cr.stat)).st_size > unique_limit:
-                                cr = source
+                            if (await asyncio.to_thread(cr.stat)).st_size > MAX_SEND_MB * 1024 * 1024:
+                                raise RuntimeError(f"После сжатия файл для канала всё ещё превышает лимит отправки {MAX_SEND_MB} МБ")
                     if cr.suffix.lower() == ".mp3":
                         await self.bot.send_audio(ch["channel_id"], FSInputFile(cr))
                     else:
@@ -491,9 +505,11 @@ class Engine:
                             await asyncio.wait_for(asyncio.to_thread(p.wait), timeout=3)
                         except asyncio.TimeoutError:
                             p.kill()
+                            await asyncio.to_thread(p.wait)
                 except Exception:
                     pass
-        self.processes.clear()
+        with self._proc_lock:
+            self.processes.clear()
         if self.cleaner_task:
             self.cleaner_task.cancel()
         for t in list(self.workers):
@@ -508,7 +524,8 @@ class Engine:
 
 
 @router.message(CommandStart())
-async def start(m: Message, bot: Bot):
+async def start(m: Message, bot: Bot, state: FSMContext):
+    await state.clear()
     await db.aensure_user(m.from_user.id, m.from_user.username, m.from_user.first_name)
     if m.text:
         parts = m.text.split(maxsplit=1)
@@ -526,7 +543,8 @@ async def start(m: Message, bot: Bot):
 
 
 @router.callback_query(F.data == "menu_ref")
-async def menu_ref(c: CallbackQuery, bot: Bot):
+async def menu_ref(c: CallbackQuery, bot: Bot, state: FSMContext):
+    await state.clear()
     me = await bot.get_me()
     username = me.username
     if not username:
@@ -539,7 +557,8 @@ async def menu_ref(c: CallbackQuery, bot: Bot):
 
 
 @router.callback_query(F.data == "check_opp")
-async def check_opp(c: CallbackQuery, bot: Bot):
+async def check_opp(c: CallbackQuery, bot: Bot, state: FSMContext):
+    await state.clear()
     missing, rows = await opp_check(bot, c.from_user.id)
     await c.answer()
     await c.message.edit_text("❌ Не все обязательные подписки выполнены." if missing else "✅ ОПП выполнены.", reply_markup=kb(rows) if missing else menu(c.from_user.id))
@@ -553,7 +572,8 @@ async def back(c: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "settings")
-async def settings(c: CallbackQuery):
+async def settings(c: CallbackQuery, state: FSMContext):
+    await state.clear()
     u = await db.aget_user(c.from_user.id)
     f = u["format"] if u else "video"
     await c.answer()
@@ -561,24 +581,27 @@ async def settings(c: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("fmt:"))
-async def fmt(c: CallbackQuery):
+async def fmt(c: CallbackQuery, state: FSMContext):
+    await state.clear()
     v = c.data.split(":", 1)[1]
     if v not in {"video", "mp3"}:
         await c.answer("Ошибка", show_alert=True)
         return
     await db.aset_format(c.from_user.id, v)
     await c.answer("Сохранено")
-    await settings(c)
+    await settings(c, state)
 
 
 @router.callback_query(F.data == "premium")
-async def premium(c: CallbackQuery):
+async def premium(c: CallbackQuery, state: FSMContext):
+    await state.clear()
     await c.answer()
     await c.message.edit_text("⭐ Выберите срок Premium:", reply_markup=premium_menu())
 
 
 @router.callback_query(F.data == "stars")
-async def stars(c: CallbackQuery):
+async def stars(c: CallbackQuery, state: FSMContext):
+    await state.clear()
     url = await db.aget_setting("stars_link", "")
     if not url:
         await c.answer("Партнёрская ссылка Stars пока не настроена.", show_alert=True)
@@ -588,7 +611,8 @@ async def stars(c: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("buy:"))
-async def buy(c: CallbackQuery, bot: Bot):
+async def buy(c: CallbackQuery, bot: Bot, state: FSMContext):
+    await state.clear()
     try:
         days = int(c.data.split(":", 1)[1])
         price = PREMIUM_PLANS[days]
@@ -637,7 +661,8 @@ async def paid(m: Message):
 
 
 @router.callback_query(F.data == "download")
-async def download_menu(c: CallbackQuery, bot: Bot):
+async def download_menu(c: CallbackQuery, bot: Bot, state: FSMContext):
+    await state.clear()
     missing, _ = await opp_check(bot, c.from_user.id)
     if missing:
         await c.answer("Сначала выполните ОПП", show_alert=True)
@@ -655,20 +680,19 @@ async def url_message(m: Message, bot: Bot, engine: Engine):
     try:
         await engine.add(m.from_user.id, url=m.text.strip())
         await m.answer("⏳ Ссылка добавлена в очередь.")
-    except RuntimeError as e:
+    except (RuntimeError, ValueError) as e:
         await m.answer(f"❌ {e}")
 
 
 @router.callback_query(F.data == "upload")
-async def upload_menu(c: CallbackQuery):
+async def upload_menu(c: CallbackQuery, state: FSMContext):
+    await state.clear()
     await c.answer()
     await c.message.edit_text(f"📤 Отправьте видео до {MAX_USER_UPLOAD_MB} МБ.", reply_markup=kb([[B("◀️ Назад", "back")]]))
 
 
 @router.message(StateFilter(None), F.video)
 async def upload(m: Message, bot: Bot, engine: Engine):
-    # file_size is optional in Telegram's Bot API. Never treat None as zero,
-    # and always enforce the limit again after downloading the actual bytes.
     if m.video.file_size is not None and m.video.file_size > MAX_USER_UPLOAD_MB * 1024 * 1024:
         await m.answer(f"❌ Максимальный размер файла — {MAX_USER_UPLOAD_MB} МБ.")
         return
@@ -697,14 +721,16 @@ async def upload(m: Message, bot: Bot, engine: Engine):
 
 
 @router.callback_query(F.data == "restart")
-async def restart(c: CallbackQuery, engine: Engine):
+async def restart(c: CallbackQuery, engine: Engine, state: FSMContext):
+    await state.clear()
     await engine.restart(c.from_user.id)
     await c.answer("Ваши задачи отменены")
     await c.message.edit_text("🔄 Только ваши задачи отменены. Очереди других пользователей не затронуты.", reply_markup=menu(c.from_user.id))
 
 
 @router.callback_query(F.data == "channels")
-async def channels(c: CallbackQuery):
+async def channels(c: CallbackQuery, state: FSMContext):
+    await state.clear()
     rows = [[B("➕ Добавить канал", "addch")]]
     for ch in await db.alist_channels(c.from_user.id):
         rows.append([B(f'{"🟢" if ch["enabled"] else "⚪"} {ch["title"] or ch["channel_id"]}', f'ch:{ch["channel_id"]}')])
@@ -741,8 +767,9 @@ async def addch_value(m: Message, state: FSMContext, bot: Bot):
         await m.answer("❌ Канал не найден или бот не имеет доступа. Добавьте бота в администраторы и попробуйте снова.")
     except ValueError as e:
         await m.answer(f"❌ {e}")
-    except Exception as e:
-        await m.answer("❌ Не удалось добавить канал: " + str(e)[:250])
+    except Exception:
+        logger.exception("Failed to add channel for uid=%s", m.from_user.id)
+        await m.answer("❌ Не удалось добавить канал.")
 
 
 @router.callback_query(F.data.startswith("ch:"))
@@ -785,11 +812,12 @@ async def dele(c: CallbackQuery):
         return
     await db.aremove_channel(c.from_user.id, cid)
     await c.answer("Удалено")
-    await channels(c)
+    await channels(c, FSMContext(storage=None, key=None))
 
 
 @router.callback_query(F.data == "wm")
-async def wm(c: CallbackQuery):
+async def wm(c: CallbackQuery, state: FSMContext):
+    await state.clear()
     await c.answer()
     await c.message.edit_text("💧 Водяной знак пользователя:", reply_markup=kb([[B("📝 Текст", "wmtext")], [B("🖼 PNG", "wmlogo")], [B("◀️ Назад", "back")]]))
 
@@ -801,6 +829,10 @@ async def cwm(c: CallbackQuery, state: FSMContext):
     except (ValueError, AttributeError):
         await c.answer("Некорректный канал", show_alert=True)
         return
+    row = next((x for x in await db.alist_channels(c.from_user.id) if x["channel_id"] == cid), None)
+    if not row:
+        await c.answer("Канал не найден", show_alert=True)
+        return
     await state.update_data(cid=cid)
     await c.answer()
     await c.message.edit_text("💧 Watermark этого канала:", reply_markup=kb([[B("📝 Текст", "cwmtext")], [B("🖼 PNG", "cwmlogo")], [B("◀️ Назад", "channels")]]))
@@ -809,6 +841,11 @@ async def cwm(c: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.in_({"wmtext", "cwmtext"}))
 async def wmtext(c: CallbackQuery, state: FSMContext):
     cid = None if c.data == "wmtext" else (await state.get_data()).get("cid")
+    if cid is not None:
+        row = next((x for x in await db.alist_channels(c.from_user.id) if x["channel_id"] == cid), None)
+        if not row:
+            await c.answer("Канал не найден", show_alert=True)
+            return
     await state.update_data(channel=cid)
     await state.set_state(S.wm)
     await c.answer()
@@ -817,7 +854,10 @@ async def wmtext(c: CallbackQuery, state: FSMContext):
 
 @router.message(S.wm)
 async def wmvalue(m: Message, state: FSMContext):
-    p = [x.strip() for x in (m.text or "").split("|")]
+    if not m.text or not m.text.strip():
+        await m.answer("❌ Введите текст watermark.")
+        return
+    p = [x.strip() for x in m.text.split("|")]
     if len(p) not in (1, 5):
         await m.answer("Формат: ТЕКСТ|ПОЗИЦИЯ|РАЗМЕР|ЦВЕТ|ПРОЗРАЧНОСТЬ")
         return
@@ -836,6 +876,11 @@ async def wmvalue(m: Message, state: FSMContext):
     w = {"type": "text", "text": text, "position": position, "size": size, "color": color, "opacity": opacity}
     cid = d.get("channel")
     if cid:
+        row = next((x for x in await db.alist_channels(m.from_user.id) if x["channel_id"] == cid), None)
+        if not row:
+            await state.clear()
+            await m.answer("❌ Канал больше не подключён.", reply_markup=menu(m.from_user.id))
+            return
         await db.aset_channel_watermark(cid, m.from_user.id, w)
     else:
         await db.aset_user_watermark(m.from_user.id, w)
@@ -846,6 +891,11 @@ async def wmvalue(m: Message, state: FSMContext):
 @router.callback_query(F.data.in_({"wmlogo", "cwmlogo"}))
 async def wmlogo(c: CallbackQuery, state: FSMContext):
     cid = None if c.data == "wmlogo" else (await state.get_data()).get("cid")
+    if cid is not None:
+        row = next((x for x in await db.alist_channels(c.from_user.id) if x["channel_id"] == cid), None)
+        if not row:
+            await c.answer("Канал не найден", show_alert=True)
+            return
     await state.update_data(channel=cid)
     await state.set_state(S.logo)
     await c.answer()
@@ -855,8 +905,6 @@ async def wmlogo(c: CallbackQuery, state: FSMContext):
 @router.message(S.logo, F.document)
 async def logovalue(m: Message, bot: Bot, state: FSMContext):
     name = (m.document.file_name or "").lower()
-    # file_size may be absent. Filename is only a hint; validate_logo checks
-    # the downloaded file itself, while the size is enforced after download.
     if not name.endswith(".png"):
         await m.answer("❌ Нужен PNG до 5 МБ.")
         return
@@ -877,6 +925,10 @@ async def logovalue(m: Message, bot: Bot, state: FSMContext):
             return
         d = await state.get_data()
         cid = d.get("channel")
+        if cid is not None:
+            row = next((x for x in await db.alist_channels(m.from_user.id) if x["channel_id"] == cid), None)
+            if not row:
+                raise ValueError("Канал больше не подключён.")
         w = {"type": "image", "logo": str(p), "position": "br"}
         if cid:
             await db.aset_channel_watermark(cid, m.from_user.id, w)
@@ -893,7 +945,8 @@ async def logovalue(m: Message, bot: Bot, state: FSMContext):
 
 
 @router.callback_query(F.data == "admin")
-async def admin(c: CallbackQuery):
+async def admin(c: CallbackQuery, state: FSMContext):
+    await state.clear()
     if c.from_user.id != ADMIN_ID:
         await c.answer("Нет доступа", show_alert=True)
         return
@@ -904,6 +957,7 @@ async def admin(c: CallbackQuery):
 @router.callback_query(F.data == "aopp")
 async def aopp(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
+        await c.answer("Нет доступа", show_alert=True)
         return
     rows = [[B(f'ОПП {r["slot"]}: {"🟢" if r["enabled"] else "⚪"}', f'opp:{r["slot"]}')] for r in await db.aget_opp()]
     rows.append([B("◀️ Назад", "admin")])
@@ -914,10 +968,14 @@ async def aopp(c: CallbackQuery):
 @router.callback_query(F.data.startswith("opp:"))
 async def opp(c: CallbackQuery, state: FSMContext):
     if c.from_user.id != ADMIN_ID:
+        await c.answer("Нет доступа", show_alert=True)
         return
     try:
         slot = int(c.data.split(":", 1)[1])
     except (ValueError, AttributeError):
+        await c.answer("Некорректный слот", show_alert=True)
+        return
+    if slot not in {1, 2, 3}:
         await c.answer("Некорректный слот", show_alert=True)
         return
     await state.update_data(slot=slot)
@@ -929,8 +987,13 @@ async def opp(c: CallbackQuery, state: FSMContext):
 @router.message(S.admin_opp)
 async def oppvalue(m: Message, state: FSMContext):
     if m.from_user.id != ADMIN_ID:
+        await state.clear()
         return
-    slot = (await state.get_data())["slot"]
+    slot = (await state.get_data()).get("slot")
+    if slot not in {1, 2, 3}:
+        await state.clear()
+        await m.answer("❌ Некорректный слот.")
+        return
     text = (m.text or "").strip()
     if text.upper() == "ВЫКЛ":
         await db.aset_opp(slot, False, "", "")
@@ -941,10 +1004,7 @@ async def oppvalue(m: Message, state: FSMContext):
             return
         opp_url = p[2].strip()
         parsed = urlparse(opp_url)
-        scheme = parsed.scheme
-        host = parsed.hostname
-        path = parsed.path.strip("/")
-        if scheme != "https" or host not in ("t.me", "telegram.me") or not path or path.startswith("+") or path.startswith("joinchat/"):
+        if parsed.scheme != "https" or parsed.hostname not in ("t.me", "telegram.me") or parsed.username or parsed.password or parsed.port is not None or not parsed.path.strip("/") or parsed.path.strip("/").startswith(("+", "joinchat/")):
             await m.answer("❌ ОПП должна быть публичной ссылкой https://t.me/username. Приватные invite-ссылки проверить нельзя.")
             return
         await db.aset_opp(slot, p[0].strip().upper() == "ВКЛ", p[1].strip(), opp_url)
@@ -955,6 +1015,7 @@ async def oppvalue(m: Message, state: FSMContext):
 @router.callback_query(F.data == "aad")
 async def aad(c: CallbackQuery, state: FSMContext):
     if c.from_user.id != ADMIN_ID:
+        await c.answer("Нет доступа", show_alert=True)
         return
     await state.set_state(S.admin_ad)
     await c.answer()
@@ -964,6 +1025,7 @@ async def aad(c: CallbackQuery, state: FSMContext):
 @router.message(S.admin_ad)
 async def advalue(m: Message, state: FSMContext):
     if m.from_user.id != ADMIN_ID:
+        await state.clear()
         return
     text = (m.text or "").strip()
     if text.upper() == "ВЫКЛ":
@@ -974,8 +1036,14 @@ async def advalue(m: Message, state: FSMContext):
         if len(p) != 3:
             await m.answer("Формат: ТЕКСТ|КНОПКА|URL")
             return
-        for k, v in zip(("ad_text", "ad_button", "ad_url"), p):
-            await db.aset_setting(k, v.strip())
+        ad_text, ad_button, ad_url = (x.strip() for x in p)
+        parsed = urlparse(ad_url)
+        if parsed.scheme not in {"https", "http"} or not parsed.hostname or parsed.username or parsed.password or "\r" in ad_url or "\n" in ad_url:
+            await m.answer("❌ Нужен корректный HTTP/HTTPS URL без учётных данных.")
+            return
+        await db.aset_setting("ad_text", ad_text[:500])
+        await db.aset_setting("ad_button", ad_button[:100])
+        await db.aset_setting("ad_url", ad_url[:2000])
     await state.clear()
     await m.answer("✅ Реклама сохранена.", reply_markup=menu(m.from_user.id))
 
@@ -983,6 +1051,7 @@ async def advalue(m: Message, state: FSMContext):
 @router.callback_query(F.data == "astars")
 async def astars(c: CallbackQuery, state: FSMContext):
     if c.from_user.id != ADMIN_ID:
+        await c.answer("Нет доступа", show_alert=True)
         return
     await state.set_state(S.admin_stars)
     await c.answer()
@@ -992,12 +1061,14 @@ async def astars(c: CallbackQuery, state: FSMContext):
 @router.message(S.admin_stars)
 async def astarsvalue(m: Message, state: FSMContext):
     if m.from_user.id != ADMIN_ID:
+        await state.clear()
         return
-    parsed = urlparse((m.text or "").strip())
-    if parsed.scheme != "https" or parsed.hostname not in ("t.me", "telegram.me"):
-        await m.answer("❌ Нужна ссылка https://t.me/...")
+    raw = (m.text or "").strip()
+    parsed = urlparse(raw)
+    if parsed.scheme != "https" or parsed.hostname not in ("t.me", "telegram.me") or parsed.username or parsed.password or parsed.port is not None or "\r" in raw or "\n" in raw:
+        await m.answer("❌ Нужна ссылка https://t.me/... без учётных данных.")
         return
-    await db.aset_setting("stars_link", m.text.strip())
+    await db.aset_setting("stars_link", raw[:2000])
     await state.clear()
     await m.answer("✅ Ссылка Stars изменена.", reply_markup=menu(m.from_user.id))
 
@@ -1005,6 +1076,7 @@ async def astarsvalue(m: Message, state: FSMContext):
 @router.callback_query(F.data == "aytdlp")
 async def aytdlp(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
+        await c.answer("Нет доступа", show_alert=True)
         return
     await c.answer()
     await c.message.edit_text("🔄 yt-dlp закреплён на версии из requirements.txt. Для ручного обновления обновите пакет на сервере и перезапустите бота.", reply_markup=kb([[B("◀️ Назад", "admin")]]))
@@ -1013,6 +1085,7 @@ async def aytdlp(c: CallbackQuery):
 @router.callback_query(F.data == "abot")
 async def abot(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
+        await c.answer("Нет доступа", show_alert=True)
         return
     await c.answer()
     await c.message.edit_text("Перезапустить бота?", reply_markup=kb([[B("✅ Подтвердить", "abot:yes"), B("❌ Отмена", "admin")]]))
@@ -1021,6 +1094,7 @@ async def abot(c: CallbackQuery):
 @router.callback_query(F.data == "abot:yes")
 async def abot_yes(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
+        await c.answer("Нет доступа", show_alert=True)
         return
     await c.answer("Бот перезапускается")
     asyncio.create_task(_exit_later())
@@ -1034,7 +1108,8 @@ async def _exit_later():
 
 
 @router.message(Command("paysupport"))
-async def paysupport(m: Message):
+async def paysupport(m: Message, state: FSMContext):
+    await state.clear()
     await m.answer("💳 По вопросам оплаты Premium напишите администратору.")
 
 
@@ -1052,18 +1127,15 @@ async def main():
     dp["engine"] = engine
     dp.include_router(router)
     await bot.get_me()
-
     def _signal_handler(sig):
         logger.info("Received signal %s, initiating graceful shutdown...", sig.name)
         asyncio.create_task(dp.stop_polling())
-
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
             loop.add_signal_handler(sig, lambda s=sig: _signal_handler(s))
         except ValueError:
             pass
-
     await engine.start()
     try:
         await dp.start_polling(bot)
