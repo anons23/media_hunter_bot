@@ -16,14 +16,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import (
-    COOKIES_PATH,
-    LOGO_DIR,
-    MAX_WATERMARK_MB,
-    MAX_WATERMARK_PX,
-    MEDIA_DIR,
-    MAX_SOURCE_DOWNLOAD_MB,
-)
+from .config import COOKIES_PATH, LOGO_DIR, MAX_WATERMARK_MB, MAX_WATERMARK_PX, MEDIA_DIR, MAX_SOURCE_DOWNLOAD_MB
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +53,12 @@ def cleanup_media(age_hours: int, protected_paths: set[str]) -> None:
     if not MEDIA_DIR.exists():
         return
     cutoff = time.time() - age_hours * 3600
-    protected = {str(Path(p).resolve()) for p in protected_paths}
+    protected: set[str] = set()
+    for p in protected_paths:
+        try:
+            protected.add(str(Path(p).resolve()))
+        except OSError:
+            continue
     for root, dirs, files in os.walk(str(MEDIA_DIR), topdown=False):
         for name in files:
             fp = Path(root) / name
@@ -84,7 +82,12 @@ def cleanup_logos(age_hours: int, active_logos: set[str]) -> None:
     if not LOGO_DIR.exists():
         return
     cutoff = time.time() - age_hours * 3600
-    active = {str(Path(p).resolve()) for p in active_logos}
+    active: set[str] = set()
+    for p in active_logos:
+        try:
+            active.add(str(Path(p).resolve()))
+        except OSError:
+            continue
     for f in LOGO_DIR.iterdir():
         if not f.is_file():
             continue
@@ -100,6 +103,8 @@ def cleanup_logos(age_hours: int, active_logos: set[str]) -> None:
 def validate_source_url(url: str) -> str:
     """Validate a downloader URL and reject local/private network targets."""
     raw = str(url).strip()
+    if "\r" in raw or "\n" in raw:
+        raise ValueError("Недопустимые символы в URL")
     from urllib.parse import urlparse
     parsed = urlparse(raw)
     if parsed.scheme.lower() not in {"http", "https"}:
@@ -122,10 +127,7 @@ def validate_source_url(url: str) -> str:
 
 def playlist_items(url: str, max_items: int) -> list[str]:
     url = validate_source_url(url)
-    cmd = [
-        "yt-dlp", "--flat-playlist", "--print", "%(webpage_url)s",
-        "--playlist-end", str(max_items), "--quiet", url,
-    ]
+    cmd = ["yt-dlp", "--flat-playlist", "--print", "%(webpage_url)s", "--playlist-end", str(max_items), "--quiet", url]
     if COOKIES_PATH.exists():
         cmd.extend(["--cookies", str(COOKIES_PATH)])
     proc = _run(cmd, timeout=60)
@@ -141,17 +143,11 @@ def playlist_items(url: str, max_items: int) -> list[str]:
 def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> Path:
     url = validate_source_url(url)
     free = shutil.disk_usage(work_dir).free
-    # Keep a large safety reserve because source files can be up to 1.5 GB and
-    # yt-dlp may need additional temporary space while merging streams.
     minimum_free = max(512 * 1024 * 1024, MAX_SOURCE_DOWNLOAD_MB * 3 * 1024 * 1024)
     if free < minimum_free:
         raise RuntimeError("Недостаточно свободного места на диске для загрузки")
     out_template = str(work_dir / "source.%(ext)s")
-    cmd = [
-        "yt-dlp", "--no-playlist", "--no-warnings",
-        "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]/best",
-        "--merge-output-format", "mp4", "--max-filesize", f"{MAX_SOURCE_DOWNLOAD_MB}M", "-o", out_template, "--no-progress",
-    ]
+    cmd = ["yt-dlp", "--no-playlist", "--no-warnings", "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]/best", "--merge-output-format", "mp4", "--max-filesize", f"{MAX_SOURCE_DOWNLOAD_MB}M", "-o", out_template, "--no-progress"]
     if COOKIES_PATH.exists():
         cmd.extend(["--cookies", str(COOKIES_PATH)])
     cmd.append(url)
@@ -193,11 +189,7 @@ def metadata(path: Path) -> dict[str, str]:
     return {"title": tags.get("title") or tags.get("TITLE") or path.stem, "description": tags.get("description") or tags.get("DESCRIPTION") or ""}
 
 
-_VALID_COLOR_NAMES = frozenset({
-    "white", "black", "red", "green", "blue", "yellow", "cyan", "magenta",
-    "orange", "pink", "purple", "brown", "gray", "grey", "silver", "gold",
-    "lime", "navy", "teal", "olive", "maroon", "violet", "indigo", "turquoise",
-})
+_VALID_COLOR_NAMES = frozenset({"white", "black", "red", "green", "blue", "yellow", "cyan", "magenta", "orange", "pink", "purple", "brown", "gray", "grey", "silver", "gold", "lime", "navy", "teal", "olive", "maroon", "violet", "indigo", "turquoise"})
 
 
 def _is_valid_color(color: str) -> bool:
@@ -211,19 +203,11 @@ def _is_valid_color(color: str) -> bool:
 
 
 def _positions_text(pos: str) -> str:
-    return {
-        "tl": "x=10:y=10", "tr": "x=w-text_w-10:y=10",
-        "bl": "x=10:y=h-text_h-10", "br": "x=w-text_w-10:y=h-text_h-10",
-        "c": "x=(w-text_w)/2:y=(h-text_h)/2",
-    }.get(pos, "x=w-text_w-10:y=h-text_h-10")
+    return {"tl": "x=10:y=10", "tr": "x=w-text_w-10:y=10", "bl": "x=10:y=h-text_h-10", "br": "x=w-text_w-10:y=h-text_h-10", "c": "x=(w-text_w)/2:y=(h-text_h)/2"}.get(pos, "x=w-text_w-10:y=h-text_h-10")
 
 
 def _positions_overlay(pos: str) -> str:
-    return {
-        "tl": "x=10:y=10", "tr": "x=W-w-10:y=10",
-        "bl": "x=10:y=H-h-10", "br": "x=W-w-10:y=H-h-10",
-        "c": "x=(W-w)/2:y=(H-h)/2",
-    }.get(pos, "x=W-w-10:y=H-h-10")
+    return {"tl": "x=10:y=10", "tr": "x=W-w-10:y=10", "bl": "x=10:y=H-h-10", "br": "x=W-w-10:y=H-h-10", "c": "x=(W-w)/2:y=(H-h)/2"}.get(pos, "x=W-w-10:y=H-h-10")
 
 
 def _build_text_filter(wm: dict[str, Any], work_dir: Path) -> str | None:
@@ -259,7 +243,6 @@ def _logo_path(wm: dict[str, Any]) -> Path | None:
 
 
 def process_media(source: Path, work_dir: Path, watermark: dict[str, Any], audio_only: bool, compress: bool, register: Callable[[Any], None]) -> Path:
-    """Process media; image watermark uses filter_complex and input #1."""
     if audio_only:
         output = work_dir / "output.mp3"
         cmd = ["ffmpeg", "-y", "-i", str(source), "-vn", "-ar", "44100", "-ac", "2", "-b:a", "192k", "-threads", "1", str(output)]
@@ -283,7 +266,6 @@ def process_media(source: Path, work_dir: Path, watermark: dict[str, Any], audio
             if text_filter:
                 cmd += ["-vf", text_filter]
         cmd.append(str(output))
-
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
         register(proc)
         try:
