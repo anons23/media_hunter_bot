@@ -504,7 +504,7 @@ class Engine:
                         pass
         except asyncio.CancelledError:
             raise
-                except Exception as e:
+        except Exception as e:
             logger.exception("Job failed for uid=%s", j.uid)
             safe = user_facing_error(e)
             try:
