@@ -1,64 +1,119 @@
-name: Apply v3 audit fixes
+name: Apply v3 security patch
 on:
   push:
-    branches: [Media_hanter-v3]
+    branches: [Media_hanter-v3-security]
 permissions:
   contents: write
 jobs:
-  fix:
-    if: "!contains(github.event.head_commit.message, '[audit-fix]')"
+  patch:
+    if: "!contains(github.event.head_commit.message, '[security-patch]')"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: Media_hanter-v3
+          ref: Media_hanter-v3-security
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Patch and validate
+      - name: Apply security and queue fixes
         run: |
           python - <<'PY'
           from pathlib import Path
           import re
+
+          # config.py: explicit per-user queue limit.
+          p = Path('media_hunter_bot/config.py')
+          s = p.read_text(encoding='utf-8')
+          anchor = 'MAX_QUEUE_SIZE = max(1, int(os.getenv("MAX_QUEUE_SIZE", "100")))\n'
+          if 'MAX_USER_QUEUE' not in s:
+              s = s.replace(anchor, anchor + 'MAX_USER_QUEUE = max(1, int(os.getenv("MAX_USER_QUEUE", "10")))\n', 1)
+          p.write_text(s, encoding='utf-8')
+
+          # processor.py: URL validation + downloader size/disk guard.
+          p = Path('media_hunter_bot/processor.py')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('import json\nimport logging\nimport os\n', 'import ipaddress\nimport json\nimport logging\nimport os\nimport socket\n', 1)
+          s = s.replace('from .config import COOKIES_PATH, LOGO_DIR, MAX_WATERMARK_MB, MAX_WATERMARK_PX, MEDIA_DIR\n', 'from .config import COOKIES_PATH, LOGO_DIR, MAX_WATERMARK_MB, MAX_WATERMARK_PX, MEDIA_DIR, MAX_URL_LOGICAL_MB\n', 1)
+          marker = '\ndef playlist_items(url: str, max_items: int) -> list[str]:\n'
+          if 'def validate_source_url(' not in s:
+              helper = '''\n\ndef validate_source_url(url: str) -> str:\n    """Validate a downloader URL and reject local/private network targets."""\n    raw = str(url).strip()\n    from urllib.parse import urlparse\n    parsed = urlparse(raw)\n    if parsed.scheme.lower() not in {"http", "https"}:\n        raise ValueError("Разрешены только HTTP/HTTPS ссылки")\n    if parsed.username or parsed.password:\n        raise ValueError("Ссылки с учётными данными запрещены")\n    host = parsed.hostname\n    if not host:\n        raise ValueError("Некорректный URL")\n    try:\n        addresses = {ai[4][0] for ai in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)}\n    except socket.gaierror as exc:\n        raise ValueError("Не удалось разрешить адрес ссылки") from exc\n    for addr in addresses:\n        ip = ipaddress.ip_address(addr)\n        if not ip.is_global:\n            raise ValueError("Ссылки на локальные или внутренние адреса запрещены")\n    return raw\n'''
+              s = s.replace(marker, helper + marker, 1)
+          s = s.replace('def playlist_items(url: str, max_items: int) -> list[str]:\n    cmd = [\n', 'def playlist_items(url: str, max_items: int) -> list[str]:\n    url = validate_source_url(url)\n    cmd = [\n', 1)
+          s = s.replace('        "--playlist-end", str(max_items), "--quiet", url,\n', '        "--playlist-end", str(max_items), "--quiet", url,\n', 1)
+          s = s.replace('def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> Path:\n    out_template', 'def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> Path:\n    url = validate_source_url(url)\n    free = shutil.disk_usage(work_dir).free\n    minimum_free = max(256 * 1024 * 1024, MAX_URL_LOGICAL_MB * 4 * 1024 * 1024)\n    if free < minimum_free:\n        raise RuntimeError("Недостаточно свободного места на диске для загрузки")\n    out_template', 1)
+          s = s.replace('        "--merge-output-format", "mp4", "-o", out_template, "--no-progress",\n', '        "--merge-output-format", "mp4", "--max-filesize", f"{MAX_URL_LOGICAL_MB}M", "-o", out_template, "--no-progress",\n', 1)
+          p.write_text(s, encoding='utf-8')
+
+          # handlers.py: URL validation is defense-in-depth, private OPP links are rejected,
+          # queue has per-user accounting, restart drains queued jobs, VPS reboot is removed.
           p = Path('media_hunter_bot/handlers.py')
           s = p.read_text(encoding='utf-8')
+          s = s.replace('import asyncio\nimport logging\n', 'import asyncio\nimport heapq\nimport logging\n', 1)
+          s = s.replace('    MAX_QUEUE_SIZE,\n', '    MAX_QUEUE_SIZE,\n    MAX_USER_QUEUE,\n', 1)
+          s = s.replace('    validate_logo,\n', '    validate_logo,\n    validate_source_url,\n', 1)
 
-          # Fix the broken/de-duplicated channel delete callback.
-          pattern = re.compile(
-              r'@router\.callback_query\(F\.data\.startswith\("del:"\)\)\s*'
-              r'async def dele\(c: CallbackQuery\):.*?(?=\n@router\.|\n# ═|\Z)',
-              re.S,
-          )
-          replacement = '''@router.callback_query(F.data.startswith("del:"))
-          async def dele(c: CallbackQuery):
-              await db.aremove_channel(c.from_user.id, int(c.data.split(":", 1)[1]))
-              await c.answer("Удалено")
-              await channels(c)
-          '''
-          s2, n = pattern.subn(replacement, s, count=1)
-          if n:
-              s = s2
+          # Private invite links cannot be membership-verified; refuse them in admin input.
+          old = '''        scheme = urlparse(p[2].strip()).scheme\n        host = urlparse(p[2].strip()).hostname\n        if scheme != "https" or host not in ("t.me", "telegram.me"):\n            await m.answer("❌ Нужна ссылка https://t.me/...")\n            return\n        await db.aset_opp(\n'''
+          new = '''        opp_url = p[2].strip()\n        parsed = urlparse(opp_url)\n        scheme = parsed.scheme\n        host = parsed.hostname\n        path = parsed.path.strip("/")\n        if (\n            scheme != "https"\n            or host not in ("t.me", "telegram.me")\n            or not path\n            or path.startswith("+")\n            or path.startswith("joinchat/")\n        ):\n            await m.answer("❌ ОПП должна быть публичной ссылкой https://t.me/@username или https://t.me/username. Приватные invite-ссылки проверить нельзя.")\n            return\n        await db.aset_opp(\n'''
+          if old not in s:
+              raise SystemExit('OPP validation anchor not found')
+          s = s.replace(old, new, 1)
+          s = s.replace('            slot, p[0].strip().upper() == "ВКЛ", p[1].strip(), p[2].strip()\n', '            slot, p[0].strip().upper() == "ВКЛ", p[1].strip(), opp_url\n', 1)
 
-          # Cleaner must preserve logo files referenced by users/channels.
-          old = 'await asyncio.to_thread(cleanup_logos, CLEANER_AGE_HOURS * 7, set())'
-          new = '''active_logos = await db.aactive_logo_paths()
-              await asyncio.to_thread(cleanup_logos, CLEANER_AGE_HOURS * 7, active_logos)'''
-          if old in s:
-              s = s.replace(old, new, 1)
+          # Engine accounting.
+          s = s.replace('        self._queue_size = 0\n        self._max_queue = MAX_QUEUE_SIZE\n', '        self._queue_size = 0\n        self._user_queue_size: dict[int, int] = {}\n        self._max_queue = MAX_QUEUE_SIZE\n', 1)
+
+          add_pat = re.compile(r'    async def add\(self, uid: int, url: str \| None = None, source: Path \| None = None\):\n.*?\n    def register\(self, uid: int, proc\):', re.S)
+          add_repl = '''    async def add(self, uid: int, url: str | None = None, source: Path | None = None):\n        if url:\n            url = validate_source_url(url)\n        await db.aensure_user(uid)\n        premium = await db.ais_premium(uid)\n        async with self._lock:\n            if self._queue_size >= self._max_queue:\n                raise RuntimeError(\n                    f"Очередь переполнена ({self._max_queue} задач). Попробуйте позже."\n                )\n            if self._user_queue_size.get(uid, 0) >= MAX_USER_QUEUE:\n                raise RuntimeError(\n                    f"Для одного пользователя можно поставить не более {MAX_USER_QUEUE} задач в очередь."\n                )\n            self._queue_size += 1\n            self._user_queue_size[uid] = self._user_queue_size.get(uid, 0) + 1\n            self.seq += 1\n            seq = self.seq\n            generation = self.gen.get(uid, 0)\n        if source:\n            self.uploads.setdefault(uid, set()).add(source.parent)\n        try:\n            await self.q.put(\n                Job(\n                    0 if premium else 1,\n                    seq,\n                    uid,\n                    generation,\n                    url,\n                    source,\n                )\n            )\n        except Exception:\n            async with self._lock:\n                self._queue_size = max(0, self._queue_size - 1)\n                count = self._user_queue_size.get(uid, 0) - 1\n                if count > 0:\n                    self._user_queue_size[uid] = count\n                else:\n                    self._user_queue_size.pop(uid, None)\n            raise\n\n    def register(self, uid: int, proc):'''
+          s2, n = add_pat.subn(add_repl, s, count=1)
+          if n != 1:
+              raise SystemExit('Engine.add anchor not found')
+          s = s2
+
+          # Worker accounting now decrements both global and per-user counters.
+          old = '''                async with self._lock:\n                    self._queue_size = max(0, self._queue_size - 1)\n'''
+          new = '''                async with self._lock:\n                    self._queue_size = max(0, self._queue_size - 1)\n                    count = self._user_queue_size.get(j.uid, 0) - 1\n                    if count > 0:\n                        self._user_queue_size[j.uid] = count\n                    else:\n                        self._user_queue_size.pop(j.uid, None)\n'''
+          if old not in s:
+              raise SystemExit('worker accounting anchor not found')
+          s = s.replace(old, new, 1)
+
+          # Playlist expansion obeys both global and per-user limits.
+          old = '''                    async with self._lock:\n                        free = self._max_queue - self._queue_size\n                        if len(items) > free:\n                            raise RuntimeError(\n                                f"Плейлист содержит {len(items)} видео, но свободно только {free} мест в очереди."\n                            )\n                        jobs = []\n                        for u in items:\n                            self.seq += 1\n                            self._queue_size += 1\n                            jobs.append(Job(0 if premium else 1, self.seq, j.uid, self.gen.get(j.uid, 0), u, None))\n                        for job in jobs:\n                            await self.q.put(job)\n'''
+          new = '''                    async with self._lock:\n                        free_global = self._max_queue - self._queue_size\n                        free_user = MAX_USER_QUEUE - self._user_queue_size.get(j.uid, 0)\n                        free = min(free_global, free_user)\n                        if len(items) > free:\n                            raise RuntimeError(\n                                f"Плейлист содержит {len(items)} видео, но свободно только {free} мест для ваших задач."\n                            )\n                        jobs = []\n                        generation = self.gen.get(j.uid, 0)\n                        for u in items:\n                            self.seq += 1\n                            self._queue_size += 1\n                            self._user_queue_size[j.uid] = self._user_queue_size.get(j.uid, 0) + 1\n                            jobs.append(Job(0 if premium else 1, self.seq, j.uid, generation, u, None))\n                        for job in jobs:\n                            await self.q.put(job)\n'''
+          if old not in s:
+              raise SystemExit('playlist accounting anchor not found')
+          s = s.replace(old, new, 1)
+
+          # Restart: cancel running jobs AND physically remove this user's queued jobs.
+          old = '''        self.tasks.pop(uid, None)\n\n        with self._proc_lock:\n'''
+          new = '''        self.tasks.pop(uid, None)\n\n        async with self._lock:\n            queued = list(self.q._queue)\n            kept = [job for job in queued if job.uid != uid]\n            removed = len(queued) - len(kept)\n            if removed:\n                self.q._queue[:] = kept\n                heapq.heapify(self.q._queue)\n                self._queue_size = max(0, self._queue_size - removed)\n                count = self._user_queue_size.get(uid, 0) - removed\n                if count > 0:\n                    self._user_queue_size[uid] = count\n                else:\n                    self._user_queue_size.pop(uid, None)\n\n        with self._proc_lock:\n'''
+          if old not in s:
+              raise SystemExit('restart queue anchor not found')
+          s = s.replace(old, new, 1)
+
+          # Defense in depth before playlist expansion/download.
+          old = '            if j.url:\n                items = await asyncio.to_thread(playlist_items, j.url, MAX_PLAYLIST_ITEMS)\n'
+          new = '            if j.url:\n                safe_url = validate_source_url(j.url)\n                items = await asyncio.to_thread(playlist_items, safe_url, MAX_PLAYLIST_ITEMS)\n'
+          if old not in s:
+              raise SystemExit('job URL anchor not found')
+          s = s.replace(old, new, 1)
+
+          # Remove VPS reboot capability from the bot; process restart remains available.
+          s = re.sub(r'\n\s*\[B\("🖥 Перезагрузить сервер", "areboot"\)\],', '', s, count=1)
+          s = re.sub(r'\n@router\.callback_query\(F\.data == "areboot"\).*?\n\n\n# ══', '\n\n# ══', s, count=1, flags=re.S)
+          if 'async def areboot' in s or 'def _reboot_later' in s:
+              raise SystemExit('VPS reboot handler removal failed')
 
           p.write_text(s, encoding='utf-8')
-          print('handlers patched:', n)
           PY
           python -m py_compile media_hunter_bot/processor.py media_hunter_bot/handlers.py media_hunter_bot/db.py media_hunter_bot/config.py main.py
-      - name: Commit fixes
+          grep -R "areboot\|_reboot_later" -n media_hunter_bot || true
+      - name: Commit and remove patch workflow
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add media_hunter_bot/handlers.py
-          if git diff --cached --quiet; then
-            echo 'No changes required'
-            exit 0
-          fi
-          git commit -m 'fix(v3): apply audit fixes [audit-fix]'
-          git push origin HEAD:Media_hanter-v3
+          git add media_hunter_bot/config.py media_hunter_bot/processor.py media_hunter_bot/handlers.py .github/workflows/apply-audit-fixes.yml
+          git rm -f .github/workflows/apply-audit-fixes.yml
+          git commit -m 'fix(v3): security and queue hardening [security-patch]'
+          git push origin HEAD:Media_hanter-v3-security
