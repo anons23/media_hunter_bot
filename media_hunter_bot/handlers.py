@@ -54,6 +54,8 @@ from .config import (
     MAX_QUEUE_SIZE,
     MAX_USER_QUEUE,
     MAX_URL_LOGICAL_MB,
+    SOFT_UNIQUE_SIZE_MB,
+    MAX_UNIQUE_SIZE_MB,
     MAX_SEND_MB,
     MAX_SOURCE_DOWNLOAD_MB,
     MAX_USER_UPLOAD_MB,
@@ -418,7 +420,6 @@ class Engine:
             send_limit = MAX_SEND_MB * 1024 * 1024
 
             if audio_only:
-                # MP3 обрабатывается по существующей аудио-логике.
                 result = await asyncio.to_thread(
                     process_media,
                     source,
@@ -428,16 +429,12 @@ class Engine:
                     compress=False,
                     register=register,
                 )
-
             elif size > max_unique_limit:
-                # >100 МБ и <= абсолютного лимита:
-                # отправляем оригинал без уникализации и сжатия.
+                # >100 МБ и <= абсолютного лимита: только оригинал.
                 result = source
                 oversized = True
-
             elif size > soft_unique_limit:
-                # >80 МБ и <=100 МБ:
-                # уникализация + обязательное сжатие.
+                # >80 МБ и <=100 МБ: уникализация + обязательное сжатие до 80 МБ.
                 result = await asyncio.to_thread(
                     process_media,
                     source,
@@ -447,19 +444,13 @@ class Engine:
                     compress=True,
                     register=register,
                 )
-
                 result_size = (await asyncio.to_thread(result.stat)).st_size
-
-                # После сжатия файл должен быть не больше soft-лимита.
                 if result_size > soft_unique_limit:
                     raise RuntimeError(
-                        f"После сжатия файл всё ещё превышает "
-                        f"целевой лимит {SOFT_UNIQUE_SIZE_MB} МБ"
+                        f"После сжатия файл всё ещё превышает целевой лимит {SOFT_UNIQUE_SIZE_MB} МБ"
                     )
-
             else:
-                # <=80 МБ:
-                # только уникализация, без сжатия.
+                # <=80 МБ: только уникализация, без сжатия.
                 result = await asyncio.to_thread(
                     process_media,
                     source,
@@ -469,23 +460,19 @@ class Engine:
                     compress=False,
                     register=register,
                 )
-
                 result_size = (await asyncio.to_thread(result.stat)).st_size
-
-                # Защита от неожиданного увеличения результата.
                 if result_size > send_limit:
                     raise RuntimeError(
-                        f"Результат уникализации превышает "
-                        f"лимит отправки {MAX_SEND_MB} МБ"
+                        f"Результат уникализации превышает лимит отправки {MAX_SEND_MB} МБ"
                     )
 
             meta = await asyncio.to_thread(metadata, source)
             caption = str(meta.get("description") or meta.get("title") or "")[:900]
             if oversized:
                 caption += (
-    f"\n\nℹ️ Файл больше {MAX_UNIQUE_SIZE_MB} МБ, "
-    "поэтому отправлен оригинал без уникализации."
-)
+                    f"\n\nℹ️ Файл больше {MAX_UNIQUE_SIZE_MB} МБ, "
+                    "поэтому отправлен оригинал без уникализации."
+                )
             await self._send_private(j.uid, result, caption)
             for ch in await db.alist_channels(j.uid):
                 if not ch["enabled"]:
