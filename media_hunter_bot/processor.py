@@ -16,7 +16,14 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import COOKIES_PATH, LOGO_DIR, MAX_WATERMARK_MB, MAX_WATERMARK_PX, MEDIA_DIR, MAX_URL_LOGICAL_MB, MAX_SOURCE_DOWNLOAD_MB
+from .config import (
+    COOKIES_PATH,
+    LOGO_DIR,
+    MAX_WATERMARK_MB,
+    MAX_WATERMARK_PX,
+    MEDIA_DIR,
+    MAX_SOURCE_DOWNLOAD_MB,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +97,6 @@ def cleanup_logos(age_hours: int, active_logos: set[str]) -> None:
             pass
 
 
-
 def validate_source_url(url: str) -> str:
     """Validate a downloader URL and reject local/private network targets."""
     raw = str(url).strip()
@@ -113,6 +119,7 @@ def validate_source_url(url: str) -> str:
             raise ValueError("Ссылки на локальные или внутренние адреса запрещены")
     return raw
 
+
 def playlist_items(url: str, max_items: int) -> list[str]:
     url = validate_source_url(url)
     cmd = [
@@ -134,6 +141,8 @@ def playlist_items(url: str, max_items: int) -> list[str]:
 def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> Path:
     url = validate_source_url(url)
     free = shutil.disk_usage(work_dir).free
+    # Keep a large safety reserve because source files can be up to 1.5 GB and
+    # yt-dlp may need additional temporary space while merging streams.
     minimum_free = max(512 * 1024 * 1024, MAX_SOURCE_DOWNLOAD_MB * 3 * 1024 * 1024)
     if free < minimum_free:
         raise RuntimeError("Недостаточно свободного места на диске для загрузки")
@@ -146,23 +155,27 @@ def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> Path:
     if COOKIES_PATH.exists():
         cmd.extend(["--cookies", str(COOKIES_PATH)])
     cmd.append(url)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    register(proc)
-    try:
-        _, stderr = proc.communicate(timeout=600)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        raise RuntimeError("yt-dlp timed out (10 min)")
-    finally:
-        register(None)
-    if proc.returncode != 0:
-        raise RuntimeError(f"yt-dlp error: {stderr.decode('utf-8', 'replace')[:800]}")
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+        register(proc)
+        try:
+            _, stderr = proc.communicate(timeout=600)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise RuntimeError("yt-dlp timed out (10 min)")
+        finally:
+            register(None)
+        if proc.returncode != 0:
+            raise RuntimeError(f"yt-dlp error: {stderr.decode('utf-8', 'replace')[:800]}")
     candidates = list(work_dir.glob("source.*"))
     if not candidates:
         raise RuntimeError("yt-dlp finished but no file found")
     mp4s = [c for c in candidates if c.suffix.lower() == ".mp4"]
-    return mp4s[0] if mp4s else max(candidates, key=lambda p: p.stat().st_size)
+    result = mp4s[0] if mp4s else max(candidates, key=lambda p: p.stat().st_size)
+    if result.stat().st_size > MAX_SOURCE_DOWNLOAD_MB * 1024 * 1024:
+        result.unlink(missing_ok=True)
+        raise RuntimeError(f"Исходный файл превышает абсолютный лимит {MAX_SOURCE_DOWNLOAD_MB} МБ")
+    return result
 
 
 def ffprobe(path: Path) -> tuple[dict[str, Any], int]:
@@ -253,7 +266,6 @@ def process_media(source: Path, work_dir: Path, watermark: dict[str, Any], audio
     else:
         logo = _logo_path(watermark) if watermark.get("type") == "image" else None
         has_text = watermark.get("type") == "text" and bool(watermark.get("text"))
-        # No filters and no compression: preserve an already-MP4 source without re-encoding.
         if source.suffix.lower() == ".mp4" and not compress and not logo and not has_text:
             output = work_dir / "output.mp4"
             shutil.copy2(source, output)
@@ -272,18 +284,18 @@ def process_media(source: Path, work_dir: Path, watermark: dict[str, Any], audio
                 cmd += ["-vf", text_filter]
         cmd.append(str(output))
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    register(proc)
-    try:
-        _, stderr = proc.communicate(timeout=600)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        raise RuntimeError("ffmpeg timed out (10 min)")
-    finally:
-        register(None)
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg error: {stderr.decode('utf-8', 'replace')[:800]}")
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+        register(proc)
+        try:
+            _, stderr = proc.communicate(timeout=600)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise RuntimeError("ffmpeg timed out (10 min)")
+        finally:
+            register(None)
+        if proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg error: {stderr.decode('utf-8', 'replace')[:800]}")
     if not output.exists():
         raise RuntimeError("ffmpeg finished but output file missing")
     return output
