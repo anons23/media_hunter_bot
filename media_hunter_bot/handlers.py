@@ -504,9 +504,11 @@ class Engine:
                         pass
         except asyncio.CancelledError:
             raise
-        except Exception as e:
+                except Exception as e:
+            logger.exception("Job failed for uid=%s", j.uid)
+            safe = user_facing_error(e)
             try:
-                await self.bot.send_message(j.uid, f"❌ Не удалось обработать: {str(e)[:700]}")
+                await self.bot.send_message(j.uid, f"❌ {safe}")
             except Exception:
                 pass
         finally:
