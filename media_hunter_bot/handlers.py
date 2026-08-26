@@ -492,8 +492,16 @@ class Engine:
                         await self.bot.send_audio(ch["channel_id"], FSInputFile(cr))
                     else:
                         await self.bot.send_video(ch["channel_id"], FSInputFile(cr), caption=caption or None, supports_streaming=True)
-                except Exception as e:
-                    await self.bot.send_message(j.uid, f'⚠️ Автопост в «{ch["title"]}» не выполнен: {str(e)[:250]}')
+                                except Exception as e:
+                    logger.exception("Autopost failed uid=%s channel=%s", j.uid, ch.get("channel_id"))
+                    safe = user_facing_error(e)
+                    try:
+                        await self.bot.send_message(
+                            j.uid,
+                            f'⚠️ Автопост в «{ch["title"]}» не выполнен: {safe}',
+                        )
+                    except Exception:
+                        pass
         except asyncio.CancelledError:
             raise
         except Exception as e:
