@@ -1,5 +1,4 @@
 import asyncio
-import ipaddress
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 from media_hunter_bot import db
 from media_hunter_bot import handlers
 from media_hunter_bot import processor
+from media_hunter_bot import config
 
 
 class SecurityRegressionTests(unittest.TestCase):
@@ -32,6 +32,10 @@ class SecurityRegressionTests(unittest.TestCase):
                 processor.validate_source_url("https://example.com/video"),
                 "https://example.com/video",
             )
+
+    def test_source_limit_is_above_final_telegram_limit(self):
+        self.assertEqual(config.MAX_URL_LOGICAL_MB, 49)
+        self.assertGreaterEqual(config.MAX_SOURCE_DOWNLOAD_MB, config.MAX_URL_LOGICAL_MB)
 
     def test_logo_path_is_confined_to_logo_dir(self):
         with tempfile.TemporaryDirectory() as td:
