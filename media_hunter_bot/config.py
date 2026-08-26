@@ -25,17 +25,32 @@ except ValueError:
 # to enable the local tdlib telegram-bot-api server.
 LOCAL_BOT_API = os.getenv("LOCAL_BOT_API", "").strip()
 
-MAX_URL_LOGICAL_MB = int(os.getenv("MAX_URL_LOGICAL_MB", "49"))
-MAX_SOURCE_DOWNLOAD_MB = max(MAX_URL_LOGICAL_MB, int(os.getenv("MAX_SOURCE_DOWNLOAD_MB", "200")))
+# Media policy:
+#   <= SOFT_UNIQUE_SIZE_MB: unique without forced compression.
+#   SOFT_UNIQUE_SIZE_MB..MAX_UNIQUE_SIZE_MB: unique, with compression fallback.
+#   > MAX_UNIQUE_SIZE_MB: send the original to the user (no unique processing).
+# MAX_SOURCE_DOWNLOAD_MB is an absolute safety limit for source downloads.
+SOFT_UNIQUE_SIZE_MB = int(os.getenv("SOFT_UNIQUE_SIZE_MB", "80"))
+MAX_UNIQUE_SIZE_MB = int(os.getenv("MAX_UNIQUE_SIZE_MB", "100"))
+MAX_SOURCE_DOWNLOAD_MB = max(
+    MAX_UNIQUE_SIZE_MB,
+    int(os.getenv("MAX_SOURCE_DOWNLOAD_MB", "1536")),
+)
+# Backward-compatible alias used by existing code; it now means the hard
+# unique-processing threshold, not the Telegram/API upload limit.
+MAX_URL_LOGICAL_MB = MAX_UNIQUE_SIZE_MB
 MAX_USER_UPLOAD_MB = int(os.getenv("MAX_USER_UPLOAD_MB", "49"))
 MAX_WATERMARK_MB = int(os.getenv("MAX_WATERMARK_MB", "5"))
 MAX_WATERMARK_PX = int(os.getenv("MAX_WATERMARK_PX", "2000"))
 
-MAX_CONCURRENT = max(1, int(os.getenv("MAX_CONCURRENT", "2")))
+MAX_CONCURRENT = max(1, int(os.getenv("MAX_CONCURRENT", "1")))
 MAX_PLAYLIST_ITEMS = max(1, int(os.getenv("MAX_PLAYLIST_ITEMS", "50")))
 CLEANER_AGE_HOURS = max(1, int(os.getenv("CLEANER_AGE_HOURS", "12")))
 MAX_QUEUE_SIZE = max(1, int(os.getenv("MAX_QUEUE_SIZE", "100")))
 MAX_USER_QUEUE = max(1, int(os.getenv("MAX_USER_QUEUE", "10")))
+
+if not 1 <= SOFT_UNIQUE_SIZE_MB <= MAX_UNIQUE_SIZE_MB:
+    raise ValueError("SOFT_UNIQUE_SIZE_MB must be between 1 and MAX_UNIQUE_SIZE_MB")
 
 PREMIUM_PLANS: dict[int, int] = {
     30: 150,
