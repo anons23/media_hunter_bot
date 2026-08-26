@@ -116,8 +116,8 @@ def validate_source_url(url: str) -> str:
         raise ValueError("Некорректный URL")
     try:
         addresses = {ai[4][0] for ai in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)}
-    except socket.gaierror as exc:
-        raise ValueError("Не удалось разрешить адрес ссылки") from exc
+    except socket.gaierror as exp:
+        raise ValueError("Не удалось разрешить адрес ссылки") from exp
     for addr in addresses:
         ip = ipaddress.ip_address(addr)
         if not ip.is_global:
@@ -181,8 +181,13 @@ def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> Path:
 def ffprobe(path: Path) -> tuple[dict[str, Any], int]:
     proc = _run(["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", str(path)], timeout=60)
     if proc.returncode != 0:
-        raise RuntimeError(f"ffprobe failed: {proc.stderr[:500]}")
-    info: dict[str, Any] = json.loads(proc.stdout)
+        logger.warning("ffprobe failed (code=%s): %s", proc.returncode, (proc.stderr or "")[:2000])
+        raise RuntimeError("Не удалось прочитать медиафайл. Формат не поддерживается или файл повреждён.")
+    try:
+        info: dict[str, Any] = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        logger.warning("ffprobe returned invalid JSON")
+        raise RuntimeError("Не удалось прочитать медиафайл. Формат не поддерживается или файл повреждён.")
     size = int(info.get("format", {}).get("size", path.stat().st_size))
     return info, size
 
@@ -277,13 +282,17 @@ def process_media(source: Path, work_dir: Path, watermark: dict[str, Any], audio
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
-            raise RuntimeError("ffmpeg timed out (10 min)")
+            logger.warning("ffmpeg timed out (10 min) for work_dir=%s", work_dir)
+            raise RuntimeError("Превышено время ожидания при обработке медиа. Попробуйте позже.")
         finally:
             register(None)
         if proc.returncode != 0:
-            raise RuntimeError(f"ffmpeg error: {stderr.decode('utf-8', 'replace')[:800]}")
+            err_text = stderr.decode("utf-8", "replace")[:2000]
+            logger.warning("ffmpeg failed (code=%s): %s", proc.returncode, err_text)
+            raise RuntimeError("Не удалось обработать медиа. Файл повреждён или формат не поддерживается.")
     if not output.exists():
-        raise RuntimeError("ffmpeg finished but output file missing")
+        logger.warning("ffmpeg finished but output missing in %s", work_dir)
+        raise RuntimeError("Не удалось обработать медиа. Результат не получен.")
     return output
 
 
