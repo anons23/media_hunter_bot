@@ -21,28 +21,30 @@ try:
 except ValueError:
     ADMIN_ID = 0
 
-# Empty means use the official Telegram Bot API. Set LOCAL_BOT_API explicitly
-# to enable the local tdlib telegram-bot-api server.
 LOCAL_BOT_API = os.getenv("LOCAL_BOT_API", "").strip()
 
 # Media policy:
 #   <= SOFT_UNIQUE_SIZE_MB: unique without forced compression.
 #   SOFT_UNIQUE_SIZE_MB..MAX_UNIQUE_SIZE_MB: unique, with compression fallback.
-#   > MAX_UNIQUE_SIZE_MB: send the original to the user (no unique processing).
-# MAX_SOURCE_DOWNLOAD_MB is an absolute safety limit for source downloads.
+#   > MAX_UNIQUE_SIZE_MB: send original, without unique processing.
+# MAX_SOURCE_DOWNLOAD_MB is the absolute source-size safety limit.
 SOFT_UNIQUE_SIZE_MB = int(os.getenv("SOFT_UNIQUE_SIZE_MB", "80"))
 MAX_UNIQUE_SIZE_MB = int(os.getenv("MAX_UNIQUE_SIZE_MB", "100"))
 MAX_SOURCE_DOWNLOAD_MB = max(
     MAX_UNIQUE_SIZE_MB,
     int(os.getenv("MAX_SOURCE_DOWNLOAD_MB", "1536")),
 )
-# Backward-compatible alias used by existing code; it now means the hard
-# unique-processing threshold, not the Telegram/API upload limit.
 MAX_URL_LOGICAL_MB = MAX_UNIQUE_SIZE_MB
-MAX_USER_UPLOAD_MB = int(os.getenv("MAX_USER_UPLOAD_MB", "49"))
+# Direct user uploads follow the same policy as URL downloads. This is an
+# absolute safety limit, not the unique-processing threshold.
+MAX_USER_UPLOAD_MB = max(
+    MAX_SOURCE_DOWNLOAD_MB,
+    int(os.getenv("MAX_USER_UPLOAD_MB", str(MAX_SOURCE_DOWNLOAD_MB)),
+)
 MAX_WATERMARK_MB = int(os.getenv("MAX_WATERMARK_MB", "5"))
 MAX_WATERMARK_PX = int(os.getenv("MAX_WATERMARK_PX", "2000"))
 
+# One CPU VPS: keep heavy media processing serialized by default.
 MAX_CONCURRENT = max(1, int(os.getenv("MAX_CONCURRENT", "1")))
 MAX_PLAYLIST_ITEMS = max(1, int(os.getenv("MAX_PLAYLIST_ITEMS", "50")))
 CLEANER_AGE_HOURS = max(1, int(os.getenv("CLEANER_AGE_HOURS", "12")))
@@ -51,6 +53,10 @@ MAX_USER_QUEUE = max(1, int(os.getenv("MAX_USER_QUEUE", "10")))
 
 if not 1 <= SOFT_UNIQUE_SIZE_MB <= MAX_UNIQUE_SIZE_MB:
     raise ValueError("SOFT_UNIQUE_SIZE_MB must be between 1 and MAX_UNIQUE_SIZE_MB")
+if MAX_SOURCE_DOWNLOAD_MB < MAX_UNIQUE_SIZE_MB:
+    raise ValueError("MAX_SOURCE_DOWNLOAD_MB must be >= MAX_UNIQUE_SIZE_MB")
+if MAX_USER_UPLOAD_MB < MAX_UNIQUE_SIZE_MB:
+    raise ValueError("MAX_USER_UPLOAD_MB must be >= MAX_UNIQUE_SIZE_MB")
 
 PREMIUM_PLANS: dict[int, int] = {
     30: 150,
