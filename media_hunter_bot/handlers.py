@@ -54,6 +54,7 @@ from .config import (
     MAX_QUEUE_SIZE,
     MAX_USER_QUEUE,
     MAX_URL_LOGICAL_MB,
+    MAX_SOURCE_DOWNLOAD_MB,
     MAX_USER_UPLOAD_MB,
     MEDIA_DIR,
     PREMIUM_PLANS,
@@ -406,10 +407,15 @@ class Engine:
                         jobs = []
                         generation = self.gen.get(j.uid, 0)
                         for u in items:
+                            try:
+                                safe_item_url = validate_source_url(u)
+                            except ValueError:
+                                logger.warning("Skipping unsafe playlist item for uid=%s: %s", j.uid, u)
+                                continue
                             self.seq += 1
                             self._queue_size += 1
                             self._user_queue_size[j.uid] = self._user_queue_size.get(j.uid, 0) + 1
-                            jobs.append(Job(0 if premium else 1, self.seq, j.uid, generation, u, None))
+                            jobs.append(Job(0 if premium else 1, self.seq, j.uid, generation, safe_item_url, None))
                         for job in jobs:
                             await self.q.put(job)
                     await self.bot.send_message(
@@ -425,51 +431,60 @@ class Engine:
             if not source or not source.exists():
                 raise RuntimeError("Исходный файл не найден")
 
-            # ── probe & limits ─────────────────────────────────────────────
+            # ── probe & media policy ──────────────────────────────────────
             _, size = await asyncio.to_thread(ffprobe, source)
-            oversized = size > MAX_URL_LOGICAL_MB * 1024 * 1024
+            hard_limit = MAX_SOURCE_DOWNLOAD_MB * 1024 * 1024
+            unique_limit = MAX_URL_LOGICAL_MB * 1024 * 1024
+            if size > hard_limit:
+                raise RuntimeError(
+                    f"Исходный файл превышает абсолютный лимит {MAX_SOURCE_DOWNLOAD_MB} МБ"
+                )
+
             fmt = user["format"]
             audio_only = fmt == "mp3"
-            limit = MAX_URL_LOGICAL_MB * 1024 * 1024
+            oversized = (not audio_only) and size > unique_limit
+            watermark = await db.aget_user_watermark(j.uid)
 
-            # 1st pass
-            result = await asyncio.to_thread(
-                process_media,
-                source,
-                work,
-                await db.aget_user_watermark(j.uid),
-                audio_only=audio_only,
-                compress=oversized and not audio_only,
-                register=register,
-            )
-            result_size = (await asyncio.to_thread(result.stat)).st_size
-
-            # 2nd pass: watermark bloated the file
-            needs_second = not audio_only and not oversized and result_size > limit
-            if needs_second:
+            if oversized:
+                # Large videos are sent as-is. Do not spend the 1-CPU VPS on
+                # FFmpeg and do not degrade long/high-quality originals.
+                result = source
+            else:
+                # First pass keeps quality. If watermarking pushes the result
+                # over 100 MB, a second compressed pass is attempted.
                 result = await asyncio.to_thread(
                     process_media,
                     source,
                     work,
-                    await db.aget_user_watermark(j.uid),
-                    audio_only=False,
-                    compress=True,
+                    watermark,
+                    audio_only=audio_only,
+                    compress=False,
                     register=register,
                 )
                 result_size = (await asyncio.to_thread(result.stat)).st_size
-
-            if not audio_only and result_size > limit:
-                raise RuntimeError(
-                    f"Не удалось подготовить видео до лимита {MAX_URL_LOGICAL_MB} МБ"
-                )
+                if not audio_only and result_size > unique_limit:
+                    result = await asyncio.to_thread(
+                        process_media,
+                        source,
+                        work,
+                        watermark,
+                        audio_only=False,
+                        compress=True,
+                        register=register,
+                    )
+                    result_size = (await asyncio.to_thread(result.stat)).st_size
+                    if result_size > unique_limit:
+                        # We cannot safely guarantee the 100 MB unique output;
+                        # fall back to the original instead of failing the job.
+                        result = source
+                        oversized = True
 
             # ── send to user ───────────────────────────────────────────────
             meta = await asyncio.to_thread(metadata, source)
             caption = str(meta.get("description") or meta.get("title") or "")[:900]
             if oversized:
                 caption += (
-                    f"\n\nℹ️ Исходный файл превышал {MAX_URL_LOGICAL_MB} МБ. "
-                    "Видео сжато до установленного лимита."
+                    f"\n\nℹ️ Файл больше {MAX_URL_LOGICAL_MB} МБ, поэтому отправлен оригинал без уникализации."
                 )
             await self._send_private(j.uid, result, caption)
 
@@ -478,35 +493,32 @@ class Engine:
                 if not ch["enabled"]:
                     continue
                 try:
-                    if audio_only:
-                        cr = result
+                    if audio_only or oversized:
+                        cr = result if audio_only else source
                     else:
+                        channel_wm = await db.aget_channel_watermark(ch["channel_id"], j.uid)
                         cr = await asyncio.to_thread(
                             process_media,
                             source,
                             work,
-                            await db.aget_channel_watermark(ch["channel_id"], j.uid),
+                            channel_wm,
                             audio_only=False,
-                            compress=oversized,
+                            compress=False,
                             register=register,
                         )
                         cr_size = (await asyncio.to_thread(cr.stat)).st_size
-                        # 2nd pass: channel watermark bloated the file
-                        if not oversized and cr_size > limit:
+                        if cr_size > unique_limit:
                             cr = await asyncio.to_thread(
                                 process_media,
                                 source,
                                 work,
-                                await db.aget_channel_watermark(ch["channel_id"], j.uid),
+                                channel_wm,
                                 audio_only=False,
                                 compress=True,
                                 register=register,
                             )
-                            cr_size = (await asyncio.to_thread(cr.stat)).st_size
-                        if cr_size > limit:
-                            raise RuntimeError(
-                                f"канальное видео превышает лимит {MAX_URL_LOGICAL_MB} МБ"
-                            )
+                            if (await asyncio.to_thread(cr.stat)).st_size > unique_limit:
+                                cr = source
                     if cr.suffix.lower() == ".mp3":
                         await self.bot.send_audio(ch["channel_id"], FSInputFile(cr))
                     else:
@@ -848,7 +860,7 @@ async def upload_menu(c: CallbackQuery):
 @router.message(StateFilter(None), F.video)
 async def upload(m: Message, bot: Bot, engine: Engine):
     if m.video.file_size and m.video.file_size > MAX_USER_UPLOAD_MB * 1024 * 1024:
-        await m.answer(f"❌ Максимум {MAX_USER_UPLOAD_MB} МБ.")
+        await m.answer(f"❌ Максимальный размер файла — {MAX_USER_UPLOAD_MB} МБ.")
         return
     missing, rows = await opp_check(bot, m.from_user.id)
     if missing:
@@ -868,7 +880,7 @@ async def upload(m: Message, bot: Bot, engine: Engine):
             bot.download_file(f.file_path, destination=dst), timeout=300
         )
         if dst.stat().st_size > MAX_USER_UPLOAD_MB * 1024 * 1024:
-            raise RuntimeError(f"Файл превышает лимит {MAX_USER_UPLOAD_MB} МБ")
+            raise RuntimeError(f"Файл превышает абсолютный лимит {MAX_USER_UPLOAD_MB} МБ")
         await engine.add(m.from_user.id, source=dst)
         handed = True
         await m.answer("⏳ Видео принято в очередь.")
@@ -1291,7 +1303,7 @@ async def aytdlp(c: CallbackQuery):
         return
     await c.answer()
     await c.message.edit_text(
-        "🔄 yt-dlp проверяется каждый день в 06:00 по Москве и после загрузки VPS. Если версия изменилась — бот перезапускается.",
+        "🔄 yt-dlp закреплён на версии из requirements.txt. Для ручного обновления обновите пакет на сервере и перезапустите бота.",
         reply_markup=kb([[B("◀️ Назад", "admin")]]),
     )
 
@@ -1314,12 +1326,6 @@ async def abot_yes(c: CallbackQuery):
     asyncio.create_task(_exit_later())
 
 
-
-
-    if c.from_user.id != ADMIN_ID:
-        return
-    await c.answer("VPS перезагружается", show_alert=True)
-    asyncio.create_task(_reboot_later())
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
