@@ -24,24 +24,21 @@ except ValueError:
 LOCAL_BOT_API = os.getenv("LOCAL_BOT_API", "").strip()
 
 # Media policy:
-#   MAX_URL_LOGICAL_MB: largest source that still gets normal unique processing.
-#   MAX_SEND_MB: output-size threshold that triggers the compressed fallback.
+#   <= SOFT_UNIQUE_SIZE_MB: unique without forced compression.
+#   SOFT_UNIQUE_SIZE_MB..MAX_UNIQUE_SIZE_MB: unique, with compression fallback.
+#   > MAX_UNIQUE_SIZE_MB: send original, without unique processing.
 # MAX_SOURCE_DOWNLOAD_MB is the absolute source-size safety limit.
 SOFT_UNIQUE_SIZE_MB = int(os.getenv("SOFT_UNIQUE_SIZE_MB", "80"))
-# Kept for compatibility with existing deployments/configuration.
 MAX_UNIQUE_SIZE_MB = int(os.getenv("MAX_UNIQUE_SIZE_MB", "100"))
 MAX_SEND_MB = int(os.getenv("MAX_SEND_MB", str(MAX_UNIQUE_SIZE_MB)))
 MAX_SOURCE_DOWNLOAD_MB = max(
     MAX_UNIQUE_SIZE_MB,
     int(os.getenv("MAX_SOURCE_DOWNLOAD_MB", "1536")),
 )
-# The logical unique-processing limit is intentionally independent from the
-# send threshold. Default: 1.5 GiB.
+# MAX_URL_LOGICAL_MB is the source-size ceiling for normal unique processing.
+# It is deliberately independent from MAX_SEND_MB. Default: 1.5 GB.
 MAX_URL_LOGICAL_MB = int(os.getenv("MAX_URL_LOGICAL_MB", "1536"))
-MAX_USER_UPLOAD_MB = max(
-    MAX_SOURCE_DOWNLOAD_MB,
-    int(os.getenv("MAX_USER_UPLOAD_MB", str(MAX_SOURCE_DOWNLOAD_MB))),
-)
+MAX_USER_UPLOAD_MB = int(os.getenv("MAX_USER_UPLOAD_MB", str(MAX_SOURCE_DOWNLOAD_MB)))
 MAX_WATERMARK_MB = int(os.getenv("MAX_WATERMARK_MB", "5"))
 MAX_WATERMARK_PX = int(os.getenv("MAX_WATERMARK_PX", "2000"))
 
@@ -55,8 +52,8 @@ if not 1 <= SOFT_UNIQUE_SIZE_MB <= MAX_UNIQUE_SIZE_MB:
     raise ValueError("SOFT_UNIQUE_SIZE_MB must be between 1 and MAX_UNIQUE_SIZE_MB")
 if MAX_SOURCE_DOWNLOAD_MB < MAX_UNIQUE_SIZE_MB:
     raise ValueError("MAX_SOURCE_DOWNLOAD_MB must be >= MAX_UNIQUE_SIZE_MB")
-if MAX_USER_UPLOAD_MB < MAX_UNIQUE_SIZE_MB:
-    raise ValueError("MAX_USER_UPLOAD_MB must be >= MAX_UNIQUE_SIZE_MB")
+if MAX_USER_UPLOAD_MB < 1:
+    raise ValueError("MAX_USER_UPLOAD_MB must be >= 1")
 if MAX_SEND_MB < 1:
     raise ValueError("MAX_SEND_MB must be >= 1")
 if MAX_URL_LOGICAL_MB < 1 or MAX_URL_LOGICAL_MB > MAX_SOURCE_DOWNLOAD_MB:
