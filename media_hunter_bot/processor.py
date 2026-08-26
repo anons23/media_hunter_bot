@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import COOKIES_PATH, LOGO_DIR, MAX_WATERMARK_MB, MAX_WATERMARK_PX, MEDIA_DIR, MAX_URL_LOGICAL_MB
+from .config import COOKIES_PATH, LOGO_DIR, MAX_WATERMARK_MB, MAX_WATERMARK_PX, MEDIA_DIR, MAX_URL_LOGICAL_MB, MAX_SOURCE_DOWNLOAD_MB
 
 logger = logging.getLogger(__name__)
 
@@ -134,14 +134,14 @@ def playlist_items(url: str, max_items: int) -> list[str]:
 def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> Path:
     url = validate_source_url(url)
     free = shutil.disk_usage(work_dir).free
-    minimum_free = max(256 * 1024 * 1024, MAX_URL_LOGICAL_MB * 4 * 1024 * 1024)
+    minimum_free = max(512 * 1024 * 1024, MAX_SOURCE_DOWNLOAD_MB * 3 * 1024 * 1024)
     if free < minimum_free:
         raise RuntimeError("Недостаточно свободного места на диске для загрузки")
     out_template = str(work_dir / "source.%(ext)s")
     cmd = [
         "yt-dlp", "--no-playlist", "--no-warnings",
         "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]/best",
-        "--merge-output-format", "mp4", "--max-filesize", f"{MAX_URL_LOGICAL_MB}M", "-o", out_template, "--no-progress",
+        "--merge-output-format", "mp4", "--max-filesize", f"{MAX_SOURCE_DOWNLOAD_MB}M", "-o", out_template, "--no-progress",
     ]
     if COOKIES_PATH.exists():
         cmd.extend(["--cookies", str(COOKIES_PATH)])

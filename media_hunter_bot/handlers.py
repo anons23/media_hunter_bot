@@ -394,8 +394,10 @@ class Engine:
                 if len(items) > 1:
                     premium = await db.ais_premium(j.uid)
                     async with self._lock:
-                        free_global = self._max_queue - self._queue_size
-                        free_user = MAX_USER_QUEUE - self._user_queue_size.get(j.uid, 0)
+                        current_global = 1
+                        current_user = 1
+                        free_global = self._max_queue - self._queue_size + current_global
+                        free_user = MAX_USER_QUEUE - self._user_queue_size.get(j.uid, 0) + current_user
                         free = min(free_global, free_user)
                         if len(items) > free:
                             raise RuntimeError(

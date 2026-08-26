@@ -26,6 +26,7 @@ except ValueError:
 LOCAL_BOT_API = os.getenv("LOCAL_BOT_API", "").strip()
 
 MAX_URL_LOGICAL_MB = int(os.getenv("MAX_URL_LOGICAL_MB", "49"))
+MAX_SOURCE_DOWNLOAD_MB = max(MAX_URL_LOGICAL_MB, int(os.getenv("MAX_SOURCE_DOWNLOAD_MB", "200")))
 MAX_USER_UPLOAD_MB = int(os.getenv("MAX_USER_UPLOAD_MB", "49"))
 MAX_WATERMARK_MB = int(os.getenv("MAX_WATERMARK_MB", "5"))
 MAX_WATERMARK_PX = int(os.getenv("MAX_WATERMARK_PX", "2000"))
