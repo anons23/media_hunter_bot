@@ -436,6 +436,11 @@ class Engine:
                     compress=False,
                     register=register,
                 )
+                result_size = (await asyncio.to_thread(result.stat)).st_size
+                if result_size > send_limit:
+                    raise RuntimeError(
+                        f"Результат MP3 превышает лимит отправки {MAX_SEND_MB} МБ"
+                    )
             elif size > max_unique_limit:
                 # >100 МБ и <= абсолютного лимита: только оригинал.
                 result = source
