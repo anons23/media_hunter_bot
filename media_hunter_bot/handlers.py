@@ -265,6 +265,28 @@ class Engine:
                     self._user_queue_size.pop(uid, None)
                 raise
 
+    def register(self, uid: int, proc, generation: int | None = None):
+        with self._proc_lock:
+            if proc is None:
+                for p in list(self.processes.get(uid, set())):
+                    if getattr(p, "returncode", None) is not None:
+                        self.processes[uid].discard(p)
+                return
+            if generation is not None and generation != self.gen.get(uid, 0):
+                try:
+                    if getattr(proc, "returncode", None) is None:
+                        proc.terminate()
+                except Exception:
+                    pass
+                return
+            self.processes.setdefault(uid, set()).add(proc)
+
+    def active_paths(self) -> set[str]:
+        paths = set(self.active_work_dirs)
+        for roots in self.uploads.values():
+            paths.update(str(p) for p in roots if p.exists())
+        return paths
+
     async def restart(self, uid: int):
         async with self._lock:
             self.gen[uid] = self.gen.get(uid, 0) + 1
