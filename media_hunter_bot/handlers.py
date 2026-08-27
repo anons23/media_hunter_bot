@@ -229,6 +229,7 @@ class Engine:
             url = validate_source_url(url)
         await db.aensure_user(uid)
         premium = await db.ais_premium(uid)
+
         async with self._lock:
             if uid in self._restarting:
                 raise RuntimeError("Ваши задачи сейчас перезапускаются. Попробуйте снова через несколько секунд.")
@@ -236,49 +237,33 @@ class Engine:
                 raise RuntimeError(f"Очередь переполнена ({self._max_queue} задач). Попробуйте позже.")
             if self._user_queue_size.get(uid, 0) >= MAX_USER_QUEUE:
                 raise RuntimeError(f"Для одного пользователя можно поставить не более {MAX_USER_QUEUE} задач в очередь.")
+
             self._queue_size += 1
             self._user_queue_size[uid] = self._user_queue_size.get(uid, 0) + 1
             self.seq += 1
             seq = self.seq
             generation = self.gen.get(uid, 0)
-        if source:
-            async with self._lock:
-                if uid in self._restarting:
-                    raise RuntimeError("Ваши задачи сейчас перезапускаются. Попробуйте снова через несколько секунд.")
+
+            if source:
                 self.uploads.setdefault(uid, set()).add(source.parent)
-        try:
-            await self.q.put(Job(0 if premium else 1, seq, uid, generation, url, source))
-        except Exception:
-            async with self._lock:
+
+            try:
+                await self.q.put(Job(0 if premium else 1, seq, uid, generation, url, source))
+            except Exception:
+                if source:
+                    roots = self.uploads.get(uid)
+                    if roots is not None:
+                        roots.discard(source.parent)
+                        if not roots:
+                            self.uploads.pop(uid, None)
+
                 self._queue_size = max(0, self._queue_size - 1)
                 count = self._user_queue_size.get(uid, 0) - 1
                 if count > 0:
                     self._user_queue_size[uid] = count
                 else:
                     self._user_queue_size.pop(uid, None)
-            raise
-
-    def register(self, uid: int, proc, generation: int | None = None):
-        with self._proc_lock:
-            if proc is None:
-                for p in list(self.processes.get(uid, set())):
-                    if getattr(p, "returncode", None) is not None:
-                        self.processes[uid].discard(p)
-                return
-            if generation is not None and generation != self.gen.get(uid, 0):
-                try:
-                    if getattr(proc, "returncode", None) is None:
-                        proc.terminate()
-                except Exception:
-                    pass
-                return
-            self.processes.setdefault(uid, set()).add(proc)
-
-    def active_paths(self) -> set[str]:
-        paths = set(self.active_work_dirs)
-        for roots in self.uploads.values():
-            paths.update(str(p) for p in roots if p.exists())
-        return paths
+                raise
 
     async def restart(self, uid: int):
         async with self._lock:
