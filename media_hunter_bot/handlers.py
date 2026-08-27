@@ -436,11 +436,6 @@ class Engine:
                     compress=False,
                     register=register,
                 )
-                result_size = (await asyncio.to_thread(result.stat)).st_size
-                if result_size > send_limit:
-                    raise RuntimeError(
-                        f"Результат MP3 превышает лимит отправки {MAX_SEND_MB} МБ"
-                    )
             elif size > max_unique_limit:
                 # >100 МБ и <= абсолютного лимита: только оригинал.
                 result = source
@@ -472,11 +467,6 @@ class Engine:
                     compress=False,
                     register=register,
                 )
-                result_size = (await asyncio.to_thread(result.stat)).st_size
-                if result_size > send_limit:
-                    raise RuntimeError(
-                        f"Результат уникализации превышает лимит отправки {MAX_SEND_MB} МБ"
-                    )
 
             meta = await asyncio.to_thread(metadata, source)
             caption = str(meta.get("description") or meta.get("title") or "")[:900]
@@ -485,11 +475,12 @@ class Engine:
                     f"\n\nℹ️ Файл больше {MAX_UNIQUE_SIZE_MB} МБ, "
                     "поэтому отправлен оригинал без уникализации."
                 )
-                result_size = (await asyncio.to_thread(result.stat)).st_size
-                if result_size > send_limit:
-                    raise RuntimeError(
-                        f"Результат MP3 превышает лимит отправки {MAX_SEND_MB} МБ"
-                    )
+
+            result_size = (await asyncio.to_thread(result.stat)).st_size
+            if result_size > send_limit:
+                raise RuntimeError(
+                    f"Результат превышает лимит отправки {MAX_SEND_MB} МБ"
+                )
             await self._send_private(j.uid, result, caption)
             for ch in await db.alist_channels(j.uid):
                 if not ch["enabled"]:
