@@ -165,9 +165,11 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertIn("safe_item_url = validate_source_url(u)", source)
         self.assertIn("Skipping unsafe playlist item", source)
 
-    def test_logical_limit_is_explicitly_configurable(self):
-        source = Path(config.__file__).read_text(encoding="utf-8")
-        self.assertIn('os.getenv("MAX_URL_LOGICAL_MB", str(MAX_UNIQUE_SIZE_MB))', source)
+    def test_logical_limit_matches_unique_limit(self):
+        self.assertEqual(
+            config.MAX_URL_LOGICAL_MB,
+            config.MAX_UNIQUE_SIZE_MB,
+        )
 
 
 if __name__ == "__main__":
