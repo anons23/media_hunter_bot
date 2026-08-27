@@ -735,7 +735,7 @@ async def url_message(m: Message, bot: Bot, engine: Engine):
         await engine.add(m.from_user.id, url=m.text.strip())
         await m.answer("⏳ Ссылка добавлена в очередь.")
     except (RuntimeError, ValueError) as e:
-        await m.answer(f"❌ {e}")
+        await m.answer(f"❌ {user_facing_error(e)}")
 
 
 @router.callback_query(F.data == "upload")
@@ -767,8 +767,11 @@ async def upload(m: Message, bot: Bot, engine: Engine):
         await engine.add(m.from_user.id, source=dst)
         handed = True
         await m.answer("⏳ Видео принято в очередь.")
-    except RuntimeError as e:
-        await m.answer(f"❌ {e}")
+    except (RuntimeError, ValueError) as e:
+        await m.answer(f"❌ {user_facing_error(e)}")
+    except Exception as e:
+        logger.exception("Upload failed for uid=%s", m.from_user.id)
+        await m.answer(f"❌ {user_facing_error(e)}")
     finally:
         if not handed:
             await asyncio.to_thread(shutil.rmtree, p, ignore_errors=True)
@@ -820,7 +823,7 @@ async def addch_value(m: Message, state: FSMContext, bot: Bot):
     except (TelegramBadRequest, TelegramForbiddenError):
         await m.answer("❌ Канал не найден или бот не имеет доступа. Добавьте бота в администраторы и попробуйте снова.")
     except ValueError as e:
-        await m.answer(f"❌ {e}")
+        await m.answer(f"❌ {user_facing_error(e)}")
     except Exception:
         logger.exception("Failed to add channel for uid=%s", m.from_user.id)
         await m.answer("❌ Не удалось добавить канал.")
@@ -992,10 +995,11 @@ async def logovalue(m: Message, bot: Bot, state: FSMContext):
         await m.answer("✅ PNG watermark сохранён.", reply_markup=menu(m.from_user.id))
     except ValueError as e:
         p.unlink(missing_ok=True)
-        await m.answer("❌ " + str(e))
-    except Exception:
+        await m.answer(f"❌ {user_facing_error(e)}")
+    except Exception as e:
         p.unlink(missing_ok=True)
-        raise
+        logger.exception("Logo upload failed for uid=%s", m.from_user.id)
+        await m.answer(f"❌ {user_facing_error(e)}")
 
 
 @router.callback_query(F.data == "admin")
