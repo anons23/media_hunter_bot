@@ -120,6 +120,36 @@ class SecurityRegressionTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_oversized_original_is_rejected_before_private_send(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                source = root / "source.mp4"
+                source_size = config.MAX_SEND_MB * 1024 * 1024 + 1
+                with source.open("wb") as f:
+                    f.truncate(source_size)
+
+                engine = handlers.Engine(AsyncMock())
+                job = handlers.Job(1, 1, 123, 0, None, source)
+                engine.gen[123] = 0
+
+                user = {"format": "mp4"}
+                with patch.object(handlers, "MEDIA_DIR", root), \
+                     patch.object(db, "aget_user", new=AsyncMock(return_value=user)), \
+                     patch.object(db, "aget_user_watermark", new=AsyncMock(return_value=None)), \
+                     patch.object(db, "alist_channels", new=AsyncMock(return_value=[])), \
+                     patch.object(handlers, "ffprobe", return_value=("mp4", config.MAX_UNIQUE_SIZE_MB * 1024 * 1024 + 1)), \
+                     patch.object(handlers, "metadata", return_value={}):
+
+                    engine._send_private = AsyncMock()
+                    await engine._run_job(job)
+
+                    engine._send_private.assert_not_awaited()
+                    engine.bot.send_message.assert_awaited_once()
+                    self.assertIn("Результат превышает лимит отправки", engine.bot.send_message.await_args.args[1])
+
+        asyncio.run(run())
+
     def test_worker_cancellation_while_waiting_does_not_call_task_done(self):
         async def run():
             engine = handlers.Engine(None)
