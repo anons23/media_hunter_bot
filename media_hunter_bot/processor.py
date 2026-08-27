@@ -297,20 +297,38 @@ def process_media(source: Path, work_dir: Path, watermark: dict[str, Any], audio
 
 
 def validate_logo(path: Path) -> tuple[bool, str]:
+    """Validate logo file; messages are safe to show to Telegram users."""
     try:
         size = path.stat().st_size
     except OSError as e:
-        return False, f"Cannot read file: {e}"
+        logger.warning("validate_logo cannot stat %s: %s", path, e)
+        return False, "Не удалось прочитать файл логотипа."
     if size > MAX_WATERMARK_MB * 1024 * 1024:
-        return False, f"Logo too large ({size // 1024 // 1024} MB, max {MAX_WATERMARK_MB} MB)"
-    proc = _run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", str(path)], timeout=30)
+        return False, f"Логотип слишком большой (макс. {MAX_WATERMARK_MB} МБ)."
+    proc = _run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=s=x:p=0",
+            str(path),
+        ],
+        timeout=30,
+    )
     if proc.returncode != 0:
-        return False, "Invalid image file (ffprobe failed)"
+        logger.warning("validate_logo probe failed for %s: %s", path, (proc.stderr or "")[:500])
+        return False, "Некорректный файл изображения."
     dims = proc.stdout.strip()
     try:
         w, h = map(int, dims.split("x", 1))
     except ValueError:
-        return False, f"Unexpected dimensions format: {dims}"
+        logger.warning("validate_logo unexpected dimensions %r for %s", dims, path)
+        return False, "Некорректный файл изображения."
     if w > MAX_WATERMARK_PX or h > MAX_WATERMARK_PX:
-        return False, f"Image too large ({w}x{h}, max {MAX_WATERMARK_PX}x{MAX_WATERMARK_PX})"
+        return False, f"Изображение слишком большое (макс. {MAX_WATERMARK_PX}×{MAX_WATERMARK_PX} px)."
     return True, ""
