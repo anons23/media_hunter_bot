@@ -74,6 +74,52 @@ class SecurityRegressionTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_add_and_restart_are_serialized(self):
+        async def run():
+            engine = handlers.Engine(None)
+            engine._max_queue = 10
+            engine.gen[123] = 0
+            engine.seq = 0
+
+            original_put = engine.q.put
+            put_started = asyncio.Event()
+            allow_put = asyncio.Event()
+
+            async def blocked_put(job):
+                put_started.set()
+                await allow_put.wait()
+                await original_put(job)
+
+            with patch.object(engine.q, "put", new=blocked_put), \
+                 patch.object(db, "aensure_user", new=AsyncMock()), \
+                 patch.object(db, "ais_premium", new=AsyncMock(return_value=False)):
+
+                add_task = asyncio.create_task(
+                    engine.add(123, url="https://example.com/video")
+                )
+
+                await asyncio.wait_for(put_started.wait(), timeout=1)
+
+                restart_task = asyncio.create_task(engine.restart(123))
+
+                await asyncio.sleep(0)
+
+                self.assertFalse(
+                    restart_task.done(),
+                    "restart() должен ждать _lock, пока add() добавляет Job в очередь",
+                )
+
+                allow_put.set()
+
+                await asyncio.wait_for(add_task, timeout=1)
+                await asyncio.wait_for(restart_task, timeout=1)
+
+            self.assertEqual(engine.q.qsize(), 0)
+            self.assertEqual(engine._queue_size, 0)
+            self.assertEqual(engine._user_queue_size.get(123, 0), 0)
+
+        asyncio.run(run())
+
     def test_worker_cancellation_while_waiting_does_not_call_task_done(self):
         async def run():
             engine = handlers.Engine(None)
