@@ -485,6 +485,11 @@ class Engine:
                     f"\n\nℹ️ Файл больше {MAX_UNIQUE_SIZE_MB} МБ, "
                     "поэтому отправлен оригинал без уникализации."
                 )
+                result_size = (await asyncio.to_thread(result.stat)).st_size
+                if result_size > send_limit:
+                    raise RuntimeError(
+                        f"Результат MP3 превышает лимит отправки {MAX_SEND_MB} МБ"
+                    )
             await self._send_private(j.uid, result, caption)
             for ch in await db.alist_channels(j.uid):
                 if not ch["enabled"]:
