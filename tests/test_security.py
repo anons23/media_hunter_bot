@@ -8,6 +8,7 @@ from media_hunter_bot import db
 from media_hunter_bot import handlers
 from media_hunter_bot import processor
 from media_hunter_bot import config
+from media_hunter_bot.config import MAX_USER_QUEUE
 
 
 class SecurityRegressionTests(unittest.TestCase):
@@ -148,6 +149,40 @@ class SecurityRegressionTests(unittest.TestCase):
             self.assertEqual(engine._user_queue_size.get(123, 0), 0)
 
         asyncio.run(run())
+
+    def test_ensure_can_enqueue_rejects_full_queues(self):
+        async def run():
+            engine = handlers.Engine(None)
+            engine._max_queue = 2
+            engine._queue_size = 2
+            with self.assertRaises(RuntimeError):
+                await engine.ensure_can_enqueue(42)
+
+            engine._queue_size = 0
+            engine._user_queue_size[42] = MAX_USER_QUEUE
+            with self.assertRaises(RuntimeError):
+                await engine.ensure_can_enqueue(42)
+
+            engine._user_queue_size[42] = 0
+            engine._restarting.add(42)
+            with self.assertRaises(RuntimeError):
+                await engine.ensure_can_enqueue(42)
+
+            engine._restarting.discard(42)
+            await engine.ensure_can_enqueue(42)
+
+        asyncio.run(run())
+
+    def test_upload_checks_queue_before_download(self):
+        source = Path(handlers.__file__).read_text(encoding="utf-8")
+        upload_start = source.index("async def upload(")
+        ensure_pos = source.index("ensure_can_enqueue", upload_start)
+        download_pos = source.index("download_file", upload_start)
+        self.assertLess(
+            ensure_pos,
+            download_pos,
+            "upload must call ensure_can_enqueue before download_file",
+        )
 
     def test_oversized_original_is_rejected_before_private_send(self):
         async def run():

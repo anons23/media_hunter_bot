@@ -10,6 +10,7 @@ Critical fixes applied:
 7. shutdown() kills FFmpeg/yt-dlp before stopping workers.
 8. ThrottlingMiddleware replies to Messages too.
 9. Telegram file_size=None is handled safely; downloaded size is always authoritative.
+10. Upload path checks queue limits before downloading the Telegram file.
 """
 from __future__ import annotations
 
@@ -223,6 +224,20 @@ class Engine:
         for _ in range(MAX_CONCURRENT):
             self.workers.append(asyncio.create_task(self._worker()))
         self.cleaner_task = asyncio.create_task(self._cleaner())
+
+    async def ensure_can_enqueue(self, uid: int) -> None:
+        """Raise if a new job cannot be accepted right now (no side effects).
+
+        Used by the upload path to reject early before downloading a large
+        Telegram file. add() still re-checks under the same lock at enqueue.
+        """
+        async with self._lock:
+            if uid in self._restarting:
+                raise RuntimeError("Ваши задачи сейчас перезапускаются. Попробуйте снова через несколько секунд.")
+            if self._queue_size >= self._max_queue:
+                raise RuntimeError(f"Очередь переполнена ({self._max_queue} задач). Попробуйте позже.")
+            if self._user_queue_size.get(uid, 0) >= MAX_USER_QUEUE:
+                raise RuntimeError(f"Для одного пользователя можно поставить не более {MAX_USER_QUEUE} задач в очередь.")
 
     async def add(self, uid: int, url: str | None = None, source: Path | None = None):
         if url:
@@ -761,6 +776,12 @@ async def upload(m: Message, bot: Bot, engine: Engine):
     missing, rows = await opp_check(bot, m.from_user.id)
     if missing:
         await m.answer("🔐 Сначала выполните обязательные подписки.", reply_markup=kb(rows))
+        return
+    # Reject before downloading a potentially large Telegram file.
+    try:
+        await engine.ensure_can_enqueue(m.from_user.id)
+    except RuntimeError as e:
+        await m.answer(f"❌ {user_facing_error(e)}")
         return
     p = MEDIA_DIR / f"upload_{m.from_user.id}_{uuid.uuid4().hex}"
     p.mkdir(parents=True, exist_ok=True)
