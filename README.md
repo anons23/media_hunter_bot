@@ -34,9 +34,16 @@ The 100 MB value is the logical unique-processing threshold, not the Telegram tr
 
 ### SSRF / network isolation
 
-`validate_source_url()` rejects non-HTTP(S), credential-bearing and locally resolved/private/link-local targets. This is defense in depth, not a complete guarantee against DNS rebinding because `yt-dlp` performs its own network resolution in a subprocess.
+`validate_source_url()` is defense in depth only:
+- allows only HTTP/HTTPS;
+- rejects credential-bearing URLs;
+- rejects known local/internal hostnames (`localhost`, `metadata`, `*.local`, `*.internal`, …);
+- rejects non-global literal IPs;
+- resolves the hostname and rejects any non-global address.
 
-For production, run the bot under a dedicated unprivileged system user and apply outbound (egress) firewall rules that block private, loopback and link-local destinations for that user. Do not run the bot as root. This prevents a DNS-rebinding result from reaching internal services even if the hostname changes after application-level validation.
+This is **not** a complete guarantee against DNS rebinding or redirect-to-internal attacks, because `yt-dlp` performs its own network resolution and may follow redirects in a subprocess.
+
+**Production requirement:** run the bot under a dedicated unprivileged system user and apply outbound (egress) firewall rules that block private, loopback and link-local destinations for that user. Do not run the bot as root. Without egress isolation a rebinding or redirect result can still reach internal services.
 
 ### Temporary files
 

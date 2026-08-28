@@ -33,6 +33,35 @@ class SecurityRegressionTests(unittest.TestCase):
                 "https://example.com/video",
             )
 
+    def test_source_url_rejects_blocked_hostnames(self):
+        blocked = (
+            "http://localhost/video",
+            "https://localhost.localdomain/x",
+            "http://metadata/computeMetadata/v1/",
+            "https://metadata.google.internal/",
+            "http://foo.local/bar",
+            "https://app.localhost/path",
+            "http://svc.internal/api",
+            "https://files.intranet/media",
+            "http://nas.corp/share",
+            "https://router.home/stream",
+            "http://printer.lan/scan",
+        )
+        for url in blocked:
+            with self.assertRaises(ValueError, msg=url):
+                processor.validate_source_url(url)
+
+    def test_source_url_rejects_literal_private_ip(self):
+        for url in (
+            "http://127.0.0.1/video",
+            "https://10.0.0.5/x",
+            "http://192.168.1.1/stream",
+            "https://[::1]/v",
+            "http://169.254.169.254/latest/meta-data/",
+        ):
+            with self.assertRaises(ValueError, msg=url):
+                processor.validate_source_url(url)
+
     def test_media_policy_thresholds(self):
         self.assertEqual(config.SOFT_UNIQUE_SIZE_MB, 80)
         self.assertEqual(config.MAX_UNIQUE_SIZE_MB, 100)

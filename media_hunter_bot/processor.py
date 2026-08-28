@@ -27,6 +27,24 @@ _FONT_PATHS = (
     "/System/Library/Fonts/Helvetica.ttc",
 )
 
+# Hostnames rejected before DNS resolution (defense in depth).
+_BLOCKED_HOSTNAMES = frozenset({
+    "localhost",
+    "localhost.localdomain",
+    "metadata",
+    "metadata.google.internal",
+    "metadata.google.com",
+})
+_BLOCKED_HOSTNAME_SUFFIXES = (
+    ".local",
+    ".localhost",
+    ".internal",
+    ".intranet",
+    ".corp",
+    ".home",
+    ".lan",
+)
+
 
 def _find_font() -> str:
     for p in _FONT_PATHS:
@@ -101,27 +119,64 @@ def cleanup_logos(age_hours: int, active_logos: set[str]) -> None:
 
 
 def validate_source_url(url: str) -> str:
-    """Validate a downloader URL and reject local/private network targets."""
+    """Validate a downloader URL and reject local/private network targets.
+
+    This is defense in depth only. yt-dlp performs its own DNS resolution
+    and may follow redirects. A production deployment MUST run the bot under
+    an unprivileged user with egress firewall rules that block private,
+    loopback and link-local destinations. Without network isolation the
+    application-level checks cannot fully prevent DNS rebinding or
+    redirect-to-internal attacks.
+    """
     raw = str(url).strip()
     if "\r" in raw or "\n" in raw:
+        logger.warning("Rejected source URL with control characters")
         raise ValueError("Недопустимые символы в URL")
+
     from urllib.parse import urlparse
     parsed = urlparse(raw)
+
     if parsed.scheme.lower() not in {"http", "https"}:
+        logger.warning("Rejected non-HTTP(S) source URL scheme=%s", parsed.scheme)
         raise ValueError("Разрешены только HTTP/HTTPS ссылки")
     if parsed.username or parsed.password:
+        logger.warning("Rejected source URL with embedded credentials")
         raise ValueError("Ссылки с учётными данными запрещены")
+
     host = parsed.hostname
     if not host:
         raise ValueError("Некорректный URL")
+
+    host_l = host.lower().rstrip(".")
+    if host_l in _BLOCKED_HOSTNAMES or any(host_l.endswith(suf) for suf in _BLOCKED_HOSTNAME_SUFFIXES):
+        logger.warning("Rejected blocked hostname in source URL: %s", host_l)
+        raise ValueError("Ссылки на локальные или внутренние адреса запрещены")
+
+    # Literal IP in hostname: reject non-global immediately without DNS.
+    try:
+        literal_ip = ipaddress.ip_address(host_l)
+    except ValueError:
+        literal_ip = None
+    if literal_ip is not None and not literal_ip.is_global:
+        logger.warning("Rejected non-global literal IP in source URL: %s", host_l)
+        raise ValueError("Ссылки на локальные или внутренние адреса запрещены")
+
     try:
         addresses = {ai[4][0] for ai in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)}
     except socket.gaierror as exp:
+        logger.warning("Failed to resolve source URL host=%s: %s", host, exp)
         raise ValueError("Не удалось разрешить адрес ссылки") from exp
+
+    if not addresses:
+        logger.warning("Empty address set for source URL host=%s", host)
+        raise ValueError("Не удалось разрешить адрес ссылки")
+
     for addr in addresses:
         ip = ipaddress.ip_address(addr)
         if not ip.is_global:
+            logger.warning("Rejected non-global resolved address host=%s addr=%s", host, addr)
             raise ValueError("Ссылки на локальные или внутренние адреса запрещены")
+
     return raw
 
 
