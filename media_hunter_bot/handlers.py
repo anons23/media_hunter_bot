@@ -420,7 +420,15 @@ class Engine:
                             jobs.append(Job(0 if premium else 1, self.seq, j.uid, generation, safe_item_url, None))
                         for job in jobs:
                             await self.q.put(job)
-                    await self.bot.send_message(j.uid, f"📚 Плейлист: {len(items)} видео добавлено в очередь.")
+                    if not jobs:
+                        await self.bot.send_message(j.uid, "📚 Плейлист не содержит допустимых ссылок.")
+                    elif len(jobs) < len(items):
+                        await self.bot.send_message(
+                            j.uid,
+                            f"📚 Плейлист: {len(jobs)} из {len(items)} видео добавлено в очередь."
+                        )
+                    else:
+                        await self.bot.send_message(j.uid, f"📚 Плейлист: {len(jobs)} видео добавлено в очередь.")
                     return
                 source_url = items[0] if len(items) == 1 else j.url
                 source = await asyncio.to_thread(download, source_url, work, register)
