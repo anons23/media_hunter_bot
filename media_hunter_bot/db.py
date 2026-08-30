@@ -413,7 +413,18 @@ def set_opp_retain_days(days: int) -> None:
 def save_payment(user_id: int, payload: str, days: int, stars: int, charge_id: str) -> bool:
     with _db() as c:
         c.execute("INSERT OR IGNORE INTO payments(user_id,payload,days,stars,telegram_charge_id,created_at) VALUES(?,?,?,?,?,?)", (user_id, payload, days, stars, charge_id, _now()))
-        return c.total_changes > 0
+        if c.total_changes <= 0:
+            return False
+        _ensure_user_locked(c, user_id, None, None)
+        r = c.execute("SELECT permanent_premium, premium_until FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if r and r["permanent_premium"]:
+            return True
+        now = datetime.now(timezone.utc)
+        cur = _parse_premium_until(r["premium_until"] if r else None)
+        base = cur if cur and cur > now else now
+        until = (base + timedelta(days=days)).isoformat()
+        c.execute("UPDATE users SET premium_until=?, updated_at=? WHERE user_id=?", (until, _now(), user_id))
+        return True
 
 
 async def aensure_user(user_id: int, username: str | None = None, first_name: str | None = None): return await asyncio.to_thread(ensure_user, user_id, username, first_name)
