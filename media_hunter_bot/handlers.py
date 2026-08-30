@@ -613,7 +613,7 @@ async def start(m: Message, bot: Bot, state: FSMContext):
                 await db.aapply_referral(m.from_user.id, referrer_id)
             except ValueError:
                 pass
-    missing, rows = await opp_check(bot, m.from_user.id)
+    missing, rows = await opp_check(bot, m.from_user.id, m.from_user.username)
     if missing:
         await m.answer("🔐 Для использования бота выполните обязательные подписки:", reply_markup=kb(rows + [[B("◀️ Назад", "back")]]))
         return
@@ -637,7 +637,7 @@ async def menu_ref(c: CallbackQuery, bot: Bot, state: FSMContext):
 @router.callback_query(F.data == "check_opp")
 async def check_opp(c: CallbackQuery, bot: Bot, state: FSMContext):
     await state.clear()
-    missing, rows = await opp_check(bot, c.from_user.id)
+    missing, rows = await opp_check(bot, c.from_user.id, c.from_user.username)
     await c.answer()
     await c.message.edit_text("❌ Не все обязательные подписки выполнены." if missing else "✅ ОПП выполнены.", reply_markup=kb(rows) if missing else menu(c.from_user.id))
 
@@ -741,7 +741,7 @@ async def paid(m: Message):
 @router.callback_query(F.data == "download")
 async def download_menu(c: CallbackQuery, bot: Bot, state: FSMContext):
     await state.clear()
-    missing, _ = await opp_check(bot, c.from_user.id)
+    missing, _ = await opp_check(bot, c.from_user.id, c.from_user.username)
     if missing:
         await c.answer("Сначала выполните ОПП", show_alert=True)
         return
@@ -751,7 +751,7 @@ async def download_menu(c: CallbackQuery, bot: Bot, state: FSMContext):
 
 @router.message(StateFilter(None), F.text.regexp(r"^https?://"))
 async def url_message(m: Message, bot: Bot, engine: Engine):
-    missing, rows = await opp_check(bot, m.from_user.id)
+    missing, rows = await opp_check(bot, m.from_user.id, m.from_user.username)
     if missing:
         await m.answer("🔐 Сначала выполните обязательные подписки.", reply_markup=kb(rows))
         return
@@ -774,7 +774,7 @@ async def upload(m: Message, bot: Bot, engine: Engine):
     if m.video.file_size is not None and m.video.file_size > MAX_USER_UPLOAD_MB * 1024 * 1024:
         await m.answer(f"❌ Максимальный размер файла — {MAX_USER_UPLOAD_MB} МБ.")
         return
-    missing, rows = await opp_check(bot, m.from_user.id)
+    missing, rows = await opp_check(bot, m.from_user.id, m.from_user.username)
     if missing:
         await m.answer("🔐 Сначала выполните обязательные подписки.", reply_markup=kb(rows))
         return
