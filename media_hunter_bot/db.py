@@ -208,10 +208,12 @@ def apply_referral(user_id: int, referrer_id: int) -> bool:
     with _db() as c:
         _ensure_user_locked(c, user_id, None, None)
         _ensure_user_locked(c, referrer_id, None, None)
-        r = c.execute("SELECT referred_by FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if r and r["referred_by"]:
+        cur = c.execute(
+            "UPDATE users SET referred_by=?, updated_at=? WHERE user_id=? AND referred_by IS NULL",
+            (referrer_id, _now(), user_id),
+        )
+        if cur.rowcount != 1:
             return False
-        c.execute("UPDATE users SET referred_by=?, updated_at=? WHERE user_id=?", (referrer_id, _now(), user_id))
         c.execute("UPDATE users SET referrals=referrals+1, updated_at=? WHERE user_id=?", (_now(), referrer_id))
         return True
 
