@@ -162,41 +162,6 @@ def premium_menu() -> InlineKeyboardMarkup:
     ])
 
 
-def _resolve_opp_target(url: str) -> str | int | None:
-    path = urlparse(url).path.strip("/")
-    if not path or path.startswith("+"):
-        return None
-    target = path.split("/")[0]
-    if target.isdigit():
-        return int(target)
-    return target if target.startswith("@") else "@" + target
-
-
-async def opp_check(bot: Bot, uid: int) -> tuple[bool, list[list[InlineKeyboardButton]]]:
-    rows: list[list[InlineKeyboardButton]] = []
-    missing = False
-    for r in await db.aactive_opp():
-        target = _resolve_opp_target(r["url"])
-        ok = False
-        if target is not None:
-            try:
-                m = await bot.get_chat_member(target, uid)
-                ok = m.status in ("member", "administrator", "creator") or (m.status == "restricted" and getattr(m, "is_member", False))
-            except Exception:
-                ok = False
-        if target is None:
-            logger.error("OPP slot %s uses an unverifiable private invite link; blocking access until admin fixes it", r["slot"])
-            missing = True
-            rows.append([B(f"⚠️ ОПП {r['slot']} требует настройки", url=r["url"])])
-            continue
-        if not ok:
-            missing = True
-            rows.append([B(r["title"] or f'ОПП {r["slot"]}', url=r["url"])])
-    if missing:
-        rows.append([B("🔄 Проверить подписку", "check_opp")])
-    return missing, rows
-
-
 @dataclass(order=True)
 class Job:
     priority: int
