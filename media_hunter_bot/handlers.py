@@ -566,6 +566,12 @@ class Engine:
                 await asyncio.to_thread(cleanup_media, CLEANER_AGE_HOURS, self.active_paths())
                 active_logos = await db.aactive_logo_paths()
                 await asyncio.to_thread(cleanup_logos, CLEANER_AGE_HOURS * 7, active_logos)
+                try:
+                    removed = await db.acleanup_expired_opp_campaigns()
+                    if removed:
+                        logger.info("Cleaned %s expired OPP campaigns", removed)
+                except Exception:
+                    logger.exception("OPP campaign cleanup failed")
             except asyncio.CancelledError:
                 raise
             except Exception:
