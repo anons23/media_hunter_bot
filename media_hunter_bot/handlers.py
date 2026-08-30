@@ -1068,7 +1068,13 @@ async def opp(c: CallbackQuery, state: FSMContext):
     await state.update_data(slot=slot)
     await state.set_state(S.admin_opp)
     await c.answer()
-    await c.message.edit_text("Отправьте: ВКЛ|Название кнопки|https://t.me/канал\nили ВЫКЛ")
+    await c.message.edit_text(
+        "Отправьте:\n"
+        "• Публичный: ВКЛ|Название|https://t.me/username\n"
+        "• Закрытый: ВКЛ|Название|-100ID|https://t.me/+invite\n"
+        "• Выключить: ВЫКЛ\n\n"
+        "Для закрытого канала бот должен быть админом (достаточно пустых прав)."
+    )
 
 
 @router.message(S.admin_opp)
