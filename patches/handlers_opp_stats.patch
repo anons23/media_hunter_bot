@@ -1,0 +1,10 @@
+--- a/media_hunter_bot/handlers.py
++++ b/media_hunter_bot/handlers.py
+@@ -126,6 +126,7 @@
+     wm = State()
+     logo = State()
+     admin_opp = State()
++    admin_opp_retain = State()
+     admin_ad = State()
+     admin_stars = State()
+ 
