@@ -254,6 +254,16 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertIn("AND referred_by IS NULL", source)
         self.assertIn("if c.rowcount != 1:", source)
 
+    def test_payment_activation_is_atomic(self):
+        source = Path(db.__file__).read_text(encoding="utf-8")
+        start = source.index("def save_payment(")
+        end = source.index("\n\ndef", start)
+        block = source[start:end]
+        self.assertIn("INSERT OR IGNORE INTO payments", block)
+        self.assertIn("premium_until", block)
+        self.assertIn("UPDATE users SET premium_until", block)
+        self.assertNotIn("return True\n\n\ndef extend_premium", block)
+
     def test_playlist_items_are_validated_before_queueing(self):
         source = Path(handlers.__file__).read_text(encoding="utf-8")
         self.assertIn("safe_item_url = validate_source_url(u)", source)
