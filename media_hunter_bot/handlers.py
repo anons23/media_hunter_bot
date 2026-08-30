@@ -1089,20 +1089,74 @@ async def oppvalue(m: Message, state: FSMContext):
         return
     text = (m.text or "").strip()
     if text.upper() == "ВЫКЛ":
-        await db.aset_opp(slot, False, "", "")
-    else:
-        p = text.split("|", 2)
-        if len(p) != 3:
-            await m.answer("Формат: ВКЛ|Название|https://t.me/канал")
-            return
-        opp_url = p[2].strip()
+        await db.aset_opp(slot, False, "", "", "")
+        await state.clear()
+        await m.answer(
+            "✅ ОПП выключено. Кампания закрыта, данные удалятся после срока хранения.",
+            reply_markup=menu(m.from_user.id),
+        )
+        return
+
+    parts = [x.strip() for x in text.split("|")]
+    if len(parts) not in (3, 4):
+        await m.answer(
+            "Формат:\n"
+            "ВКЛ|Название|https://t.me/username\n"
+            "или для закрытого:\n"
+            "ВКЛ|Название|-1001234567890|https://t.me/+invite"
+        )
+        return
+    if parts[0].upper() != "ВКЛ":
+        await m.answer("Первое поле: ВКЛ или отправьте ВЫКЛ")
+        return
+    title = parts[1][:100]
+    chat_ref = ""
+    opp_url = ""
+    if len(parts) == 3:
+        opp_url = parts[2]
         parsed = urlparse(opp_url)
-        if parsed.scheme != "https" or parsed.hostname not in ("t.me", "telegram.me") or parsed.username or parsed.password or parsed.port is not None or not parsed.path.strip("/") or parsed.path.strip("/").startswith(("+", "joinchat/")):
-            await m.answer("❌ ОПП должна быть публичной ссылкой https://t.me/username. Приватные invite-ссылки проверить нельзя.")
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in ("t.me", "telegram.me")
+            or parsed.username
+            or parsed.password
+            or parsed.port is not None
+            or not parsed.path.strip("/")
+            or parsed.path.strip("/").startswith(("+", "joinchat/"))
+        ):
+            await m.answer(
+                "❌ Для публичного канала нужна ссылка https://t.me/username.\n"
+                "Для закрытого: ВКЛ|Название|-100ID|https://t.me/+invite"
+            )
             return
-        await db.aset_opp(slot, p[0].strip().upper() == "ВКЛ", p[1].strip(), opp_url)
+        path = parsed.path.strip("/").split("/")[0]
+        chat_ref = path if path.startswith("@") else path
+    else:
+        chat_ref = parts[2]
+        opp_url = parts[3]
+        if not chat_ref:
+            await m.answer("❌ chat_ref: числовой ID канала (-100…) или @username")
+            return
+        parsed = urlparse(opp_url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in ("t.me", "telegram.me")
+            or parsed.username
+            or parsed.password
+            or parsed.port is not None
+            or not parsed.path.strip("/")
+        ):
+            await m.answer("❌ Нужна invite-ссылка https://t.me/+… или https://t.me/joinchat/…")
+            return
+    await db.aset_opp(slot, True, title, opp_url, chat_ref)
     await state.clear()
-    await m.answer("✅ ОПП сохранено.", reply_markup=menu(m.from_user.id))
+    await m.answer(
+        f"✅ ОПП {slot} включено.\nПроверка: {chat_ref}\nКнопка: {opp_url}",
+        reply_markup=menu(m.from_user.id),
+    )
+
+
+@router.callback_query(F.data == "aad")
 
 
 @router.callback_query(F.data == "aad")
