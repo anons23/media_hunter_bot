@@ -1039,8 +1039,7 @@ async def admin(c: CallbackQuery, state: FSMContext):
         await c.answer("Нет доступа", show_alert=True)
         return
     await c.answer()
-    await c.message.edit_text("👑 Админ-панель", reply_markup=kb([[B("🔐 ОПП", "aopp")], [B("📣 Реклама", "aad")], [B("💎 Ссылка Stars", "astars")], [B("🔄 Обновить yt-dlp", "aytdlp")], [B("🔄 Перезапустить бота", "abot")], [B("◀️ Назад", "back")]]))
-
+    await c.message.edit_text("👑 Админ-панель", reply_markup=kb([[B("🔐 ОПП", "aopp")], [B("📊 Отчёты ОПП", "aopp_reports")], [B("⏱ Срок хранения ОПП", "aopp_retain")], [B("📣 Реклама", "aad")], [B("💎 Ссылка Stars", "astars")], [B("🔄 Обновить yt-dlp", "aytdlp")], [B("🔄 Перезапустить бота", "abot")], [B("◀️ Назад", "back")]]))
 
 @router.callback_query(F.data == "aopp")
 async def aopp(c: CallbackQuery):
