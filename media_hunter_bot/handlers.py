@@ -739,9 +739,17 @@ async def paid(m: Message):
         return
     if uid != m.from_user.id or days not in PREMIUM_PLANS or p.currency != "XTR" or p.total_amount != PREMIUM_PLANS[days]:
         return
-    if await db.asave_payment(m.from_user.id, p.invoice_payload, days, p.total_amount, p.telegram_payment_charge_id):
-        await db.aextend_premium(m.from_user.id, days)
-        await m.answer(f"🎉 Premium активирован на {days} дней!", reply_markup=menu(m.from_user.id))
+    if await db.asave_payment(
+        m.from_user.id,
+        p.invoice_payload,
+        days,
+        p.total_amount,
+        p.telegram_payment_charge_id,
+    ):
+        await m.answer(
+            f"🎉 Premium активирован на {days} дней!",
+            reply_markup=menu(m.from_user.id),
+        )
 
 
 @router.callback_query(F.data == "download")
