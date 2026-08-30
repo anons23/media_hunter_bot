@@ -76,8 +76,9 @@ from .processor import (
     validate_logo,
     validate_source_url,
 )
-from .user_errors import user_facing_error
 from .progress import ProgressTracker
+from .opp_logic import opp_check
+from .opp_admin import register_opp_admin
 router = Router()
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,8 @@ def menu(uid: int) -> InlineKeyboardMarkup:
     if uid == ADMIN_ID:
         rows.append([B("👑 Admin", "admin")])
     return kb(rows)
+
+register_opp_admin(router, menu)
 
 
 def premium_menu() -> InlineKeyboardMarkup:
