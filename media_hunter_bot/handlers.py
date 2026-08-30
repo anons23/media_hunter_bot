@@ -392,6 +392,7 @@ class Engine:
         work.mkdir(parents=True, exist_ok=True)
         self.active_work_dirs.add(str(work))
         register = lambda p=None: self.register(j.uid, p, j.generation)
+        progress = ProgressTracker(self.bot, j.uid, has_url=bool(j.url))
         try:
             user = await db.aget_user(j.uid)
             if not user:
@@ -433,12 +434,19 @@ class Engine:
                     else:
                         await self.bot.send_message(j.uid, f"📚 Плейлист: {len(jobs)} видео добавлено в очередь.")
                     return
+                await progress.start()
+                await progress.advance("download")
                 source_url = items[0] if len(items) == 1 else j.url
                 source = await asyncio.to_thread(download, source_url, work, register)
             else:
+                await progress.start()
                 source = j.source
             if not source or not source.exists():
                 raise RuntimeError("Исходный файл не найден")
+            if j.generation != self.gen.get(j.uid, 0):
+                await progress.cancel()
+                return
+            await progress.advance("analyze")
             _, size = await asyncio.to_thread(ffprobe, source)
             hard_limit = MAX_SOURCE_DOWNLOAD_MB * 1024 * 1024
             if size > hard_limit:
@@ -447,11 +455,13 @@ class Engine:
             audio_only = fmt == "mp3"
             oversized = False
             watermark = await db.aget_user_watermark(j.uid)
-
             soft_unique_limit = SOFT_UNIQUE_SIZE_MB * 1024 * 1024
             max_unique_limit = MAX_UNIQUE_SIZE_MB * 1024 * 1024
             send_limit = MAX_SEND_MB * 1024 * 1024
-
+            if j.generation != self.gen.get(j.uid, 0):
+                await progress.cancel()
+                return
+            await progress.advance("process")
             if audio_only:
                 result = await asyncio.to_thread(
                     process_media,
@@ -507,7 +517,12 @@ class Engine:
                 raise RuntimeError(
                     f"Результат превышает лимит отправки {MAX_SEND_MB} МБ"
                 )
+            if j.generation != self.gen.get(j.uid, 0):
+                await progress.cancel()
+                return
+            await progress.advance("send")
             await self._send_private(j.uid, result, caption)
+            await progress.complete()
             for ch in await db.alist_channels(j.uid):
                 if not ch["enabled"]:
                     continue
@@ -537,10 +552,18 @@ class Engine:
                     except Exception:
                         pass
         except asyncio.CancelledError:
+            try:
+                await progress.cancel()
+            except Exception:
+                pass
             raise
         except Exception as e:
             logger.exception("Job failed for uid=%s", j.uid)
             safe = user_facing_error(e)
+            try:
+                await progress.fail()
+            except Exception:
+                pass
             try:
                 await self.bot.send_message(j.uid, f"❌ {safe}")
             except Exception:
@@ -568,7 +591,6 @@ class Engine:
         if ad:
             rows = [[B(button, url=url)]] if button and url else []
             await self.bot.send_message(uid, ad, reply_markup=kb(rows) if rows else None)
-
     async def _cleaner(self):
         while True:
             try:
