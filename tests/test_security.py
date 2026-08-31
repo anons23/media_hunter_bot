@@ -255,14 +255,19 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertIn("if cur.rowcount != 1:", source)
 
     def test_payment_activation_is_atomic(self):
-        source = Path(db.__file__).read_text(encoding="utf-8")
-        start = source.index("def save_payment(")
-        end = source.index("\n\ndef", start)
-        block = source[start:end]
-        self.assertIn("INSERT OR IGNORE INTO payments", block)
-        self.assertIn("premium_until", block)
-        self.assertIn("UPDATE users SET premium_until", block)
-        self.assertNotIn("return True\n\n\ndef extend_premium", block)
+        source = inspect.getsource(db.DB.asave_payment)
+    
+        self.assertIn("INSERT OR IGNORE INTO payments", source)
+        self.assertIn("UPDATE users", source)
+        self.assertIn("premium_until", source)
+        self.assertIn("await self.conn.commit()", source)
+    
+        insert_pos = source.index("INSERT OR IGNORE INTO payments")
+        update_pos = source.index("UPDATE users", insert_pos)
+        commit_pos = source.index("await self.conn.commit()", update_pos)
+    
+        self.assertLess(insert_pos, update_pos)
+        self.assertLess(update_pos, commit_pos)
 
     def test_playlist_items_are_validated_before_queueing(self):
         source = Path(handlers.__file__).read_text(encoding="utf-8")
