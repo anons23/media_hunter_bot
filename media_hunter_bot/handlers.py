@@ -79,6 +79,7 @@ from .processor import (
 from .progress import ProgressTracker
 from .opp_logic import opp_check
 from .opp_admin import register_opp_admin
+from .user_errors import user_facing_error
 router = Router()
 logger = logging.getLogger(__name__)
 
