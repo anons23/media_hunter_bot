@@ -252,7 +252,7 @@ class SecurityRegressionTests(unittest.TestCase):
     def test_referral_update_is_guarded_by_referred_by_null(self):
         source = Path(db.__file__).read_text(encoding="utf-8")
         self.assertIn("AND referred_by IS NULL", source)
-        self.assertIn("if c.rowcount != 1:", source)
+        self.assertIn("if cur.rowcount != 1:", source)
 
     def test_payment_activation_is_atomic(self):
         source = Path(db.__file__).read_text(encoding="utf-8")
