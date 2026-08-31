@@ -906,7 +906,7 @@ async def toggle(c: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("del:"))
-async def dele(c: CallbackQuery):
+async def dele(c: CallbackQuery, state: FSMContext):
     try:
         cid = int(c.data.split(":", 1)[1])
     except (ValueError, AttributeError):
@@ -914,7 +914,7 @@ async def dele(c: CallbackQuery):
         return
     await db.aremove_channel(c.from_user.id, cid)
     await c.answer("Удалено")
-    await channels(c, FSMContext(storage=None, key=None))
+    await channels(c, state)
 
 
 @router.callback_query(F.data == "wm")
