@@ -1173,9 +1173,6 @@ async def oppvalue(m: Message, state: FSMContext):
 
 
 @router.callback_query(F.data == "aad")
-
-
-@router.callback_query(F.data == "aad")
 async def aad(c: CallbackQuery, state: FSMContext):
     if c.from_user.id != ADMIN_ID:
         await c.answer("Нет доступа", show_alert=True)
