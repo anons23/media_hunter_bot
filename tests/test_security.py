@@ -210,8 +210,16 @@ class SecurityRegressionTests(unittest.TestCase):
                     await engine._run_job(job)
 
                     engine._send_private.assert_not_awaited()
-                    engine.bot.send_message.assert_awaited_once()
-                    self.assertIn("Результат превышает лимит отправки", engine.bot.send_message.await_args.args[1])
+                    # ProgressTracker may also call send_message; require an error about the send limit.
+                    self.assertTrue(engine.bot.send_message.await_count >= 1)
+                    texts = [
+                        " ".join(str(a) for a in call.args)
+                        for call in engine.bot.send_message.await_args_list
+                    ]
+                    self.assertTrue(
+                        any("Результат превышает лимит отправки" in t for t in texts),
+                        f"expected send-limit error in {texts!r}",
+                    )
 
         asyncio.run(run())
 
@@ -256,19 +264,25 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertIn("if cur.rowcount != 1:", source)
 
     def test_payment_activation_is_atomic(self):
-        source = inspect.getsource(db.save_payment)
-    
-        self.assertIn("INSERT OR IGNORE INTO payments", source)
-        self.assertIn("UPDATE users", source)
-        self.assertIn("premium_until", source)
-        self.assertIn("commit", source)
-    
-        insert_pos = source.index("INSERT OR IGNORE INTO payments")
-        update_pos = source.index("UPDATE users", insert_pos)
-        commit_pos = source.index("commit", update_pos)
-    
+        """Payment insert and premium extension must share one DB transaction.
+
+        commit() is performed by the _db() context manager on exit, not by
+        an explicit call inside save_payment().
+        """
+        payment_src = inspect.getsource(db.save_payment)
+        db_ctx_src = inspect.getsource(db._db)
+
+        self.assertIn("INSERT OR IGNORE INTO payments", payment_src)
+        self.assertIn("UPDATE users", payment_src)
+        self.assertIn("premium_until", payment_src)
+        self.assertIn("con.commit()", db_ctx_src)
+
+        insert_pos = payment_src.index("INSERT OR IGNORE INTO payments")
+        update_pos = payment_src.index("UPDATE users", insert_pos)
         self.assertLess(insert_pos, update_pos)
-        self.assertLess(update_pos, commit_pos)
+
+        # Duplicate charge/payload must not extend premium again.
+        self.assertIn("total_changes", payment_src)
 
     def test_playlist_items_are_validated_before_queueing(self):
         source = Path(handlers.__file__).read_text(encoding="utf-8")
