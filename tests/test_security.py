@@ -256,16 +256,16 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertIn("if cur.rowcount != 1:", source)
 
     def test_payment_activation_is_atomic(self):
-        source = inspect.getsource(db.DB.asave_payment)
+        source = inspect.getsource(db.save_payment)
     
         self.assertIn("INSERT OR IGNORE INTO payments", source)
         self.assertIn("UPDATE users", source)
         self.assertIn("premium_until", source)
-        self.assertIn("await self.conn.commit()", source)
+        self.assertIn("commit", source)
     
         insert_pos = source.index("INSERT OR IGNORE INTO payments")
         update_pos = source.index("UPDATE users", insert_pos)
-        commit_pos = source.index("await self.conn.commit()", update_pos)
+        commit_pos = source.index("commit", update_pos)
     
         self.assertLess(insert_pos, update_pos)
         self.assertLess(update_pos, commit_pos)
