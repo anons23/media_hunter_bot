@@ -58,6 +58,7 @@ from .config import (
     SOFT_UNIQUE_SIZE_MB,
     MAX_UNIQUE_SIZE_MB,
     MAX_SEND_MB,
+    MAX_WATERMARK_MB,
     MAX_SOURCE_DOWNLOAD_MB,
     MAX_USER_UPLOAD_MB,
     MEDIA_DIR,
@@ -1001,7 +1002,7 @@ async def wmlogo(c: CallbackQuery, state: FSMContext):
     await state.update_data(channel=cid)
     await state.set_state(S.logo)
     await c.answer()
-    await c.message.edit_text("🖼 Пришлите PNG-документ. Максимум 5 МБ и 2000×2000 px.", reply_markup=kb([[B("◀️ Назад", "wm" if cid is None else "channels")]]))
+    await c.message.edit_text(f"🖼Логотип не должен превышать {MAX_WATERMARK_MB} МБ", reply_markup=kb([[B("◀️ Назад", "wm" if cid is None else "channels")]]))
 
 
 @router.message(S.logo, F.document)
@@ -1010,7 +1011,7 @@ async def logovalue(m: Message, bot: Bot, state: FSMContext):
     if not name.endswith(".png"):
         await m.answer("❌ Нужен PNG до 5 МБ.")
         return
-    if m.document.file_size is not None and m.document.file_size > 5 * 1024 * 1024:
+    if m.document.file_size is not None and m.document.file_size > MAX_WATERMARK_MB * 1024 * 1024:
         await m.answer("❌ Нужен PNG до 5 МБ.")
         return
     p = LOGO_DIR / f"logo_{m.from_user.id}_{uuid.uuid4().hex}.png"
@@ -1018,7 +1019,7 @@ async def logovalue(m: Message, bot: Bot, state: FSMContext):
         f = await asyncio.wait_for(bot.get_file(m.document.file_id), timeout=60)
         await asyncio.wait_for(bot.download_file(f.file_path, destination=p), timeout=300)
         actual_size = p.stat().st_size
-        if actual_size > 5 * 1024 * 1024:
+        if actual_size > MAX_WATERMARK_MB * 1024 * 1024:
             raise ValueError("PNG превышает максимальный размер 5 МБ.")
         ok, msg = await asyncio.to_thread(validate_logo, p)
         if not ok:
