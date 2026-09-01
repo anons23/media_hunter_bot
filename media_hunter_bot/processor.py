@@ -197,10 +197,6 @@ def playlist_items(url: str, max_items: int) -> list[str]:
 
 def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> Path:
     url = validate_source_url(url)
-    free = shutil.disk_usage(work_dir).free
-    minimum_free = max(512 * 1024 * 1024, MAX_SOURCE_DOWNLOAD_MB * 3 * 1024 * 1024)
-    if free < minimum_free:
-        raise RuntimeError("Недостаточно свободного места на диске для загрузки")
     out_template = str(work_dir / "source.%(ext)s")
     cmd = ["yt-dlp", "--no-playlist", "--no-warnings", "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]/best", "--merge-output-format", "mp4", "--max-filesize", f"{MAX_SOURCE_DOWNLOAD_MB}M", "-o", out_template, "--no-progress"]
     if COOKIES_PATH.exists():

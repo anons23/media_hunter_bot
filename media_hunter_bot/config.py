@@ -34,7 +34,7 @@ MAX_UNIQUE_SIZE_MB = int(os.getenv("MAX_UNIQUE_SIZE_MB", "100"))
 MAX_SEND_MB = int(os.getenv("MAX_SEND_MB", str(MAX_UNIQUE_SIZE_MB)))
 MAX_SOURCE_DOWNLOAD_MB = max(
     MAX_UNIQUE_SIZE_MB,
-    int(os.getenv("MAX_SOURCE_DOWNLOAD_MB", "1536")),
+    int(os.getenv("MAX_SOURCE_DOWNLOAD_MB", "1024")),
 )
 # Compatibility alias: the unique-processing ceiling is 100 MB, not 1.5 GB.
 # Do not make this an independent configurable limit.
