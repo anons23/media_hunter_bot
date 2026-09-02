@@ -217,7 +217,6 @@ class Engine:
                         roots.discard(source.parent)
                         if not roots:
                             self.uploads.pop(uid, None)
-
                 self._queue_size = max(0, self._queue_size - 1)
                 count = self._user_queue_size.get(uid, 0) - 1
                 if count > 0:
@@ -394,54 +393,82 @@ class Engine:
                 raise RuntimeError(f"Исходный файл превышает абсолютный лимит {MAX_SOURCE_DOWNLOAD_MB} МБ")
             fmt = user["format"]
             audio_only = fmt == "mp3"
-            oversized = False
-            if not audio_only:
-                try:
-                    oversized = size > MAX_SEND_MB * 1024 * 1024
-                except Exception:
-                    oversized = False
-            wm = await db.aget_user_watermark(j.uid)
-            if not audio_only:
-                await progress.advance("process")
-                result = await asyncio.to_thread(process_media, source, work, wm, audio_only=False, compress=oversized, register=register)
-            else:
-                await progress.advance("process")
-                result = await asyncio.to_thread(process_media, source, work, wm, audio_only=True, compress=False, register=register)
-            if j.generation != self.gen.get(j.uid, 0):
-                await progress.cancel()
-                return
-            if result.stat().st_size > MAX_SEND_MB * 1024 * 1024:
-                raise RuntimeError(f"Результат превышает лимит отправки {MAX_SEND_MB} МБ")
-            caption = await metadata(source, media_title)
+            oversized = (not audio_only and size > MAX_SEND_MB * 1024 * 1024)
             channels = await db.alist_channels(j.uid)
-            if channels:
-                await progress.advance("send")
-                for ch in channels:
-                    if not ch["enabled"]:
-                        continue
-                    try:
-                        if audio_only or oversized:
-                            cr = result if audio_only else source
-                        else:
-                            channel_wm = await db.aget_channel_watermark(ch["channel_id"], j.uid)
-                            cr = await asyncio.to_thread(process_media, source, work, channel_wm, audio_only=False, compress=False, register=register)
-                            cr_size = (await asyncio.to_thread(cr.stat)).st_size
-                            if cr_size > MAX_SEND_MB * 1024 * 1024:
-                                cr = await asyncio.to_thread(process_media, source, work, channel_wm, audio_only=False, compress=True, register=register)
-                                if (await asyncio.to_thread(cr.stat)).st_size > MAX_SEND_MB * 1024 * 1024:
-                                    raise RuntimeError(f"После сжатия файл для канала всё ещё превышает лимит отправки {MAX_SEND_MB} МБ")
-                        if cr.suffix.lower() == ".mp3":
-                            await self.bot.send_audio(ch["channel_id"], FSInputFile(cr, filename=safe_media_filename(media_title, cr.suffix or ".mp3")))
-                        else:
-                            await self.bot.send_video(ch["channel_id"], FSInputFile(cr, filename=safe_media_filename(media_title, cr.suffix or ".mp4")), caption=caption or None, supports_streaming=True)
-                    except Exception as e:
-                        logger.exception("Autopost failed uid=%s channel=%s", j.uid, ch.get("channel_id"))
-                        safe = user_facing_error(e)
+            enabled_channels = [ch for ch in channels if ch["enabled"]]
+            caption = await metadata(source, media_title)
+
+            if audio_only:
+                await progress.advance("process")
+                result = await asyncio.to_thread(process_media, source, work, await db.aget_user_watermark(j.uid), audio_only=True, compress=False, register=register)
+                if result.stat().st_size > MAX_SEND_MB * 1024 * 1024:
+                    raise RuntimeError(f"Результат превышает лимит отправки {MAX_SEND_MB} МБ")
+                if enabled_channels:
+                    await progress.advance("send")
+                    for ch in enabled_channels:
                         try:
-                            await self.bot.send_message(j.uid, f'⚠️ Автопост в «{ch["title"]}» не выполнен: {safe}')
+                            await self.bot.send_audio(ch["channel_id"], FSInputFile(result, filename=safe_media_filename(media_title, result.suffix or ".mp3")))
+                        except Exception:
+                            logger.exception("Autopost failed uid=%s channel=%s", j.uid, ch.get("channel_id"))
+                else:
+                    await progress.advance("send")
+                    await self._send_private(j.uid, result, caption, filename=safe_media_filename(media_title, result.suffix or ".mp3"))
+            elif enabled_channels:
+                # Each enabled channel gets exactly one processing pass from the original source.
+                # This avoids first processing with the user's watermark and then processing
+                # the original again for the channel, which used to waste a full unique pass.
+                await progress.advance("process")
+                for ch in enabled_channels:
+                    channel_wm = await db.aget_channel_watermark(ch["channel_id"], j.uid)
+                    cr = await asyncio.to_thread(
+                        process_media,
+                        source,
+                        work,
+                        channel_wm,
+                        audio_only=False,
+                        compress=oversized,
+                        register=register,
+                    )
+                    if cr.stat().st_size > MAX_SEND_MB * 1024 * 1024:
+                        cr = await asyncio.to_thread(
+                            process_media,
+                            source,
+                            work,
+                            channel_wm,
+                            audio_only=False,
+                            compress=True,
+                            register=register,
+                        )
+                    if cr.stat().st_size > MAX_SEND_MB * 1024 * 1024:
+                        raise RuntimeError(f"После сжатия файл для канала всё ещё превышает лимит отправки {MAX_SEND_MB} МБ")
+                    await progress.advance("send")
+                    try:
+                        await self.bot.send_video(
+                            ch["channel_id"],
+                            FSInputFile(cr, filename=safe_media_filename(media_title, cr.suffix or ".mp4")),
+                            caption=caption or None,
+                            supports_streaming=True,
+                        )
+                    except Exception:
+                        logger.exception("Autopost failed uid=%s channel=%s", j.uid, ch.get("channel_id"))
+                        try:
+                            await self.bot.send_message(j.uid, f'⚠️ Автопост в «{ch["title"]}» не выполнен: {user_facing_error(Exception("Ошибка отправки"))}')
                         except Exception:
                             pass
             else:
+                # No enabled channels: process the user's video exactly once.
+                await progress.advance("process")
+                result = await asyncio.to_thread(
+                    process_media,
+                    source,
+                    work,
+                    await db.aget_user_watermark(j.uid),
+                    audio_only=False,
+                    compress=oversized,
+                    register=register,
+                )
+                if result.stat().st_size > MAX_SEND_MB * 1024 * 1024:
+                    raise RuntimeError(f"Результат превышает лимит отправки {MAX_SEND_MB} МБ")
                 await progress.advance("send")
                 await self._send_private(j.uid, result, caption, filename=safe_media_filename(media_title, result.suffix or ".mp4"))
             await progress.done()
@@ -846,7 +873,6 @@ async def oppvalue(m: Message, state: FSMContext, bot: Bot):
         logger.exception("Failed to save OPP for uid=%s", m.from_user.id)
         await m.answer("❌ Не удалось сохранить ОПП")
 
-
 @router.callback_query(F.data == "aopp_reports")
 async def aopp_reports(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
@@ -886,7 +912,6 @@ async def aopp_retain_value(m: Message, state: FSMContext):
         await m.answer("✅ Срок хранения изменён", reply_markup=menu(m.from_user.id))
     except ValueError as e:
         await m.answer(f"❌ {user_facing_error(e)}")
-
 
 @router.callback_query(F.data == "aad")
 async def aad(c: CallbackQuery, state: FSMContext):
