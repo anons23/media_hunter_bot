@@ -892,7 +892,7 @@ async def ch(c: CallbackQuery):
         await c.answer("Канал не найден", show_alert=True)
         return
     await c.answer()
-    await c.message.edit_text(f'📺 {row["title"]}\nАвтопост: {"🟢 включён" if row["enabled"] else "⚪ выключен"}', reply_markup=kb([[B("🔄 Автопост", f"toggle:{cid}"), B("💧 Watermark", f"cwm:{cid}")], [B("🗑 Удалить", f"del:{cid}")], [B("◀️ Назад", "channels")]]))
+    await c.message.edit_text(f'📺 {row["title"]}\nАвтопост: {"🟢 включён" if row["enabled"] else "⚪ выключен"}', reply_markup=kb([[B("🔄 Автопост", f"toggle:{cid}"), B("💧 Водяной знак", f"cwmx:{cid}")], [B("🗑 Удалить", f"del:{cid}")], [B("◀️ Назад", "channels")]]))
 
 
 @router.callback_query(F.data.startswith("toggle:"))
@@ -930,7 +930,7 @@ async def wm(c: CallbackQuery, state: FSMContext):
     await c.message.edit_text("💧 Водяной знак пользователя:", reply_markup=kb([[B("📝 Текст", "wmtext")], [B("🖼 PNG", "wmlogo")], [B("◀️ Назад", "back")]]))
 
 
-@router.callback_query(F.data.startswith("cwm:"))
+@router.callback_query(F.data.startswith("cwmx:"))
 async def cwm(c: CallbackQuery, state: FSMContext):
     try:
         cid = int(c.data.split(":", 1)[1])
