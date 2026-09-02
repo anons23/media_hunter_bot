@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from aiogram import BaseMiddleware, F, Router
 from aiogram.fsm.context import FSMContext
@@ -129,7 +128,19 @@ def _probe_dimensions(path: Path):
     if w <= 0 or h <= 0: raise RuntimeError("Не удалось определить размер изображения.")
     return w, h
 
+def _safe_logo_path(raw):
+    root = LOGO_DIR.resolve()
+    path = Path(str(raw)).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        raise ValueError("Некорректный путь логотипа.")
+    if not path.exists() or not path.is_file():
+        raise ValueError("Файл логотипа больше недоступен.")
+    return path
+
 def _render_logo_for_video(source, logo, size_percent, opacity, work_dir):
+    logo = _safe_logo_path(logo)
     vw, vh = _probe_dimensions(source)
     lw, lh = _probe_dimensions(logo)
     pct = max(5, min(int(size_percent), 80)) / 100.0
@@ -152,8 +163,7 @@ def _install_logo_processing_wrapper():
         def wrapped(source, work_dir, watermark, audio_only, compress, register):
             if audio_only or watermark.get("type") != "image" or not watermark.get("logo"):
                 return current(source, work_dir, watermark, audio_only, compress, register)
-            logo = Path(str(watermark["logo"]))
-            if not logo.exists(): return current(source, work_dir, watermark, audio_only, compress, register)
+            logo = _safe_logo_path(watermark["logo"])
             rendered = _render_logo_for_video(source, logo, int(watermark.get("logo_size", 20)), float(watermark.get("logo_opacity", 0.8)), work_dir)
             try:
                 adjusted = dict(watermark); adjusted["logo"] = str(rendered)
@@ -188,9 +198,10 @@ def register_wm_wizard(router: Router, menu_fn):
     @router.message(WmStates.text)
     async def wm_got_text(m, state):
         if not m.text or not m.text.strip(): await m.answer("❌ Пришлите обычный текст (не файл)."); return
-        await state.update_data(wm_text=m.text.strip()[:200]); await state.set_state(None)
+        text = m.text.strip()[:200]
+        await state.update_data(wm_text=text); await state.set_state(None)
         rows = [[_B(lab, f"wmcolor:{code}") for code, lab in pair] for pair in _chunk(COLORS, 2)] + [[_B("❌ Отмена", "wm_cancel")]]
-        await m.answer(f"Текст: <b>{m.text.strip()[:200]}</b>\n\n🎨 Выберите цвет:", reply_markup=_kb(rows), parse_mode="HTML")
+        await m.answer(f"Текст: <b>{text}</b>\n\n🎨 Выберите цвет:", reply_markup=_kb(rows), parse_mode="HTML")
 
     @router.callback_query(F.data.startswith("wmcolor:"))
     async def wm_color(c, state):
@@ -199,45 +210,49 @@ def register_wm_wizard(router: Router, menu_fn):
         data = await state.get_data()
         if not data.get("wm_text"): await c.answer("Сначала введите текст", show_alert=True); return
         await state.update_data(wm_color=color); await c.answer()
-        await c.message.edit_text(f"Цвет: {COLOR_RU[color]}\n\n🔤 Выберите стиль шрифта:", reply_markup=_kb([[ _B(lab, f"wmfont:{code}")] for code, lab in FONTS] + [[_B("❌ Отмена", "wm_cancel")]]))
+        await c.message.edit_text(f"Цвет: {COLOR_RU[color]}\n\n🔤 Выберите стиль шрифта:", reply_markup=_kb([[_B(lab, f"wmfont:{code}")] for code, lab in FONTS] + [[_B("❌ Отмена", "wm_cancel")]]))
 
     @router.callback_query(F.data.startswith("wmfont:"))
     async def wm_font(c, state):
         font = c.data.split(":", 1)[1]
         if font not in FONT_RU: await c.answer("Некорректный шрифт", show_alert=True); return
         await state.update_data(wm_font=font); await c.answer()
-        await c.message.edit_text(f"Шрифт: {FONT_RU[font]}\n\n📏 Выберите размер:", reply_markup=_kb([[ _B(f"{lab} ({sz})", f"wmsize:{sz}")] for sz, lab in SIZES] + [[_B("❌ Отмена", "wm_cancel")]]))
+        await c.message.edit_text(f"Шрифт: {FONT_RU[font]}\n\n📏 Выберите размер:", reply_markup=_kb([[_B(f"{lab} ({sz})", f"wmsize:{sz}")] for sz, lab in SIZES] + [[_B("❌ Отмена", "wm_cancel")]]))
 
     @router.callback_query(F.data.startswith("wmsize:"))
     async def wm_size(c, state):
         try: size = int(c.data.split(":", 1)[1])
         except ValueError: await c.answer("Некорректный размер", show_alert=True); return
+        if size not in dict(SIZES): await c.answer("Некорректный размер", show_alert=True); return
         await state.update_data(wm_size=size); await c.answer()
         await c.message.edit_text(f"Размер: {next(l for s,l in SIZES if s == size)}\n\n📍 Где показать надпись на видео?", reply_markup=_kb([[_B(lab, f"wmpos:{pos}")] for pos, lab in POSITIONS] + [[_B("❌ Отмена", "wm_cancel")]]))
 
     @router.callback_query(F.data.startswith("wmpos:"))
     async def wm_pos(c, state):
-        pos = c.data.split(":", 1)[1]; await state.update_data(wm_position=pos); await c.answer()
+        pos = c.data.split(":", 1)[1]
+        if pos not in POS_RU: await c.answer("Некорректная позиция", show_alert=True); return
+        await state.update_data(wm_position=pos); await c.answer()
         await c.message.edit_text(f"Позиция: {POS_RU[pos]}\n\n👁 Насколько яркой сделать надпись?", reply_markup=_kb([[_B(lab, f"wmop:{op}")] for op, lab in OPACITIES] + [[_B("❌ Отмена", "wm_cancel")]]))
 
     @router.callback_query(F.data.startswith("wmop:"))
     async def wm_opacity(c, state):
-        opacity = float(c.data.split(":", 1)[1]); await state.update_data(wm_opacity=opacity); data = await state.get_data(); await c.answer()
+        try: opacity = float(c.data.split(":", 1)[1])
+        except ValueError: await c.answer("Некорректное значение", show_alert=True); return
+        if opacity not in dict(OPACITIES): await c.answer("Некорректное значение", show_alert=True); return
+        await state.update_data(wm_opacity=opacity); data=await state.get_data(); await c.answer()
         await c.message.edit_text(_summary(data), reply_markup=_kb([[_B("✅ Сохранить", "wm_save"), _B("❌ Отмена", "wm_cancel")]]), parse_mode="HTML")
 
     @router.callback_query(F.data == "wm_save")
     async def wm_save(c, state):
-        data = await state.get_data()
+        data=await state.get_data()
         if not data.get("wm_text"): await c.answer("Нет текста для сохранения", show_alert=True); return
         try: await _save_watermark(c.from_user.id, data)
         except ValueError as e: await c.answer(str(e), show_alert=True); await state.clear(); return
-        await state.clear(); await c.answer("Сохранено")
-        await c.message.edit_text("✅ Водяной знак сохранён.\nОн будет на новых обработанных видео.", reply_markup=friendly_main_menu(c.from_user.id))
+        await state.clear(); await c.answer("Сохранено"); await c.message.edit_text("✅ Водяной знак сохранён.\nОн будет на новых обработанных видео.", reply_markup=friendly_main_menu(c.from_user.id))
 
     @router.callback_query(F.data == "wm_cancel")
     async def wm_cancel(c, state):
-        await state.clear(); await c.answer("Отменено")
-        await c.message.edit_text("Настройка водяного знака отменена.", reply_markup=friendly_main_menu(c.from_user.id))
+        await state.clear(); await c.answer("Отменено"); await c.message.edit_text("Настройка водяного знака отменена.", reply_markup=friendly_main_menu(c.from_user.id))
 
     @router.callback_query(F.data.in_({"wmlogo", "cwmlogo"}))
     async def logo_start(c, state):
@@ -246,23 +261,22 @@ def register_wm_wizard(router: Router, menu_fn):
             await c.answer("Канал не найден", show_alert=True); return
         await state.set_state(LogoStates.upload)
         await state.update_data(channel=cid, logo_path=None, logo_size=20, logo_position="br", logo_opacity=0.8)
-        await c.answer(); back = "wm" if cid is None else "channels"
-        await c.message.edit_text(f"🖼 <b>Загрузка логотипа</b>\n\nОтправьте PNG-файл. Максимальный размер — {MAX_WATERMARK_MB} МБ.", reply_markup=_kb([[_B("◀️ Назад", back)]]), parse_mode="HTML")
+        await c.answer(); await c.message.edit_text(f"🖼 <b>Загрузка логотипа</b>\n\nОтправьте PNG-файл. Максимальный размер — {MAX_WATERMARK_MB} МБ.", reply_markup=_kb([[_B("◀️ Назад", "wm" if cid is None else "channels")]]), parse_mode="HTML")
 
     @router.message(LogoStates.upload, F.document)
     async def logo_upload(m, bot, state):
-        name = (m.document.file_name or "").lower()
-        if not name.endswith(".png"): await m.answer(f"❌ Нужен PNG-файл до {MAX_WATERMARK_MB} МБ."); return
-        if m.document.file_size is not None and m.document.file_size > MAX_WATERMARK_MB * 1024 * 1024: await m.answer(f"❌ Нужен PNG-файл до {MAX_WATERMARK_MB} МБ."); return
-        p = LOGO_DIR / f"logo_{m.from_user.id}_{uuid.uuid4().hex}.png"
+        name=(m.document.file_name or "").lower()
+        if not name.endswith(".png") or (m.document.file_size is not None and m.document.file_size > MAX_WATERMARK_MB*1024*1024):
+            await m.answer(f"❌ Нужен PNG-файл до {MAX_WATERMARK_MB} МБ."); return
+        p=LOGO_DIR/f"logo_{m.from_user.id}_{uuid.uuid4().hex}.png"
         try:
-            f = await asyncio.wait_for(bot.get_file(m.document.file_id), timeout=60)
-            await asyncio.wait_for(bot.download_file(f.file_path, destination=p), timeout=300)
-            if p.stat().st_size > MAX_WATERMARK_MB * 1024 * 1024: raise ValueError(f"PNG превышает максимальный размер {MAX_WATERMARK_MB} МБ.")
-            ok, msg = await asyncio.to_thread(validate_logo, p)
-            if not ok: p.unlink(missing_ok=True); await m.answer("❌ " + msg); return
+            f=await asyncio.wait_for(bot.get_file(m.document.file_id),timeout=60)
+            await asyncio.wait_for(bot.download_file(f.file_path,destination=p),timeout=300)
+            if p.stat().st_size > MAX_WATERMARK_MB*1024*1024: raise ValueError(f"PNG превышает максимальный размер {MAX_WATERMARK_MB} МБ.")
+            ok,msg=await asyncio.to_thread(validate_logo,p)
+            if not ok: p.unlink(missing_ok=True); await m.answer("❌ "+msg); return
             await state.update_data(logo_path=str(p)); await state.set_state(LogoStates.settings)
-            data = await state.get_data(); await m.answer(_logo_summary(data), reply_markup=_logo_settings_keyboard(), parse_mode="HTML")
+            data=await state.get_data(); await m.answer(_logo_summary(data), reply_markup=_logo_settings_keyboard(), parse_mode="HTML")
         except ValueError as e: p.unlink(missing_ok=True); await m.answer(f"❌ {e}")
         except Exception as e: p.unlink(missing_ok=True); await m.answer(f"❌ Не удалось загрузить логотип: {e}")
 
@@ -270,52 +284,61 @@ def register_wm_wizard(router: Router, menu_fn):
         return _kb([[_B("📏 Размер", "logosize_menu"), _B("📍 Позиция", "logopos_menu")], [_B("👁 Прозрачность", "logoop_menu")], [_B("✅ Сохранить", "logo_save")], [_B("❌ Отмена", "logo_cancel")]])
 
     @router.callback_query(F.data == "logosize_menu")
-    async def logo_size_menu(c, state):
-        if not (await state.get_data()).get("logo_path"): await c.answer("Сначала загрузите логотип", show_alert=True); return
-        await c.answer(); await c.message.edit_text("📏 Выберите размер логотипа относительно видео:", reply_markup=_kb([[_B(label, f"logosize:{size}")] for size,label in LOGO_SIZES] + [[_B("◀️ Назад", "logo_settings")]]))
+    async def logo_size_menu(c,state):
+        if not (await state.get_data()).get("logo_path"): await c.answer("Сначала загрузите логотип",show_alert=True); return
+        await c.answer(); await c.message.edit_text("📏 Выберите размер логотипа относительно видео:", reply_markup=_kb([[_B(label,f"logosize:{size}")] for size,label in LOGO_SIZES]+[[_B("◀️ Назад","logo_settings")]]))
 
     @router.callback_query(F.data.startswith("logosize:"))
-    async def logo_size(c, state):
-        size = int(c.data.split(":", 1)[1]); await state.update_data(logo_size=size); data = await state.get_data(); await c.answer("Размер сохранён"); await c.message.edit_text(_logo_summary(data), reply_markup=_logo_settings_keyboard(), parse_mode="HTML")
+    async def logo_size(c,state):
+        try: size=int(c.data.split(":",1)[1])
+        except ValueError: await c.answer("Некорректный размер",show_alert=True); return
+        if size not in LOGO_SIZE_RU: await c.answer("Некорректный размер",show_alert=True); return
+        await state.update_data(logo_size=size); data=await state.get_data(); await c.answer("Размер сохранён"); await c.message.edit_text(_logo_summary(data),reply_markup=_logo_settings_keyboard(),parse_mode="HTML")
 
     @router.callback_query(F.data == "logopos_menu")
-    async def logo_pos_menu(c, state):
-        if not (await state.get_data()).get("logo_path"): await c.answer("Сначала загрузите логотип", show_alert=True); return
-        await c.answer(); await c.message.edit_text("📍 Выберите положение логотипа:", reply_markup=_kb([[_B(label, f"logopos:{pos}")] for pos,label in POSITIONS] + [[_B("◀️ Назад", "logo_settings")]]))
+    async def logo_pos_menu(c,state):
+        if not (await state.get_data()).get("logo_path"): await c.answer("Сначала загрузите логотип",show_alert=True); return
+        await c.answer(); await c.message.edit_text("📍 Выберите положение логотипа:",reply_markup=_kb([[_B(label,f"logopos:{pos}")] for pos,label in POSITIONS]+[[_B("◀️ Назад","logo_settings")]]))
 
     @router.callback_query(F.data.startswith("logopos:"))
-    async def logo_pos(c, state):
-        pos = c.data.split(":", 1)[1]; await state.update_data(logo_position=pos); data=await state.get_data(); await c.answer("Позиция сохранена"); await c.message.edit_text(_logo_summary(data), reply_markup=_logo_settings_keyboard(), parse_mode="HTML")
+    async def logo_pos(c,state):
+        pos=c.data.split(":",1)[1]
+        if pos not in POS_RU: await c.answer("Некорректная позиция",show_alert=True); return
+        await state.update_data(logo_position=pos); data=await state.get_data(); await c.answer("Позиция сохранена"); await c.message.edit_text(_logo_summary(data),reply_markup=_logo_settings_keyboard(),parse_mode="HTML")
 
     @router.callback_query(F.data == "logoop_menu")
-    async def logo_op_menu(c, state):
-        if not (await state.get_data()).get("logo_path"): await c.answer("Сначала загрузите логотип", show_alert=True); return
-        await c.answer(); await c.message.edit_text("👁 Выберите прозрачность логотипа:", reply_markup=_kb([[_B(label, f"logoop:{op}")] for op,label in LOGO_OPACITIES] + [[_B("◀️ Назад", "logo_settings")]]))
+    async def logo_op_menu(c,state):
+        if not (await state.get_data()).get("logo_path"): await c.answer("Сначала загрузите логотип",show_alert=True); return
+        await c.answer(); await c.message.edit_text("👁 Выберите прозрачность логотипа:",reply_markup=_kb([[_B(label,f"logoop:{op}")] for op,label in LOGO_OPACITIES]+[[_B("◀️ Назад","logo_settings")]]))
 
     @router.callback_query(F.data.startswith("logoop:"))
-    async def logo_opacity(c, state):
-        opacity = float(c.data.split(":",1)[1]); await state.update_data(logo_opacity=opacity); data=await state.get_data(); await c.answer("Прозрачность сохранена"); await c.message.edit_text(_logo_summary(data), reply_markup=_logo_settings_keyboard(), parse_mode="HTML")
+    async def logo_opacity(c,state):
+        try: opacity=float(c.data.split(":",1)[1])
+        except ValueError: await c.answer("Некорректное значение",show_alert=True); return
+        if opacity not in dict(LOGO_OPACITIES): await c.answer("Некорректное значение",show_alert=True); return
+        await state.update_data(logo_opacity=opacity); data=await state.get_data(); await c.answer("Прозрачность сохранена"); await c.message.edit_text(_logo_summary(data),reply_markup=_logo_settings_keyboard(),parse_mode="HTML")
 
     @router.callback_query(F.data == "logo_settings")
-    async def logo_settings(c, state):
+    async def logo_settings(c,state):
         data=await state.get_data()
-        if not data.get("logo_path"): await c.answer("Сначала загрузите логотип", show_alert=True); return
-        await c.answer(); await c.message.edit_text(_logo_summary(data), reply_markup=_logo_settings_keyboard(), parse_mode="HTML")
+        if not data.get("logo_path"): await c.answer("Сначала загрузите логотип",show_alert=True); return
+        await c.answer(); await c.message.edit_text(_logo_summary(data),reply_markup=_logo_settings_keyboard(),parse_mode="HTML")
 
     @router.callback_query(F.data == "logo_save")
-    async def logo_save(c, state):
+    async def logo_save(c,state):
         data=await state.get_data(); logo=data.get("logo_path")
-        if not logo: await c.answer("Сначала загрузите логотип", show_alert=True); return
+        if not logo: await c.answer("Сначала загрузите логотип",show_alert=True); return
+        logo=_safe_logo_path(logo)
         w={"type":"image","logo":str(logo),"position":data.get("logo_position","br"),"logo_size":int(data.get("logo_size",20)),"logo_opacity":float(data.get("logo_opacity",0.8))}; cid=data.get("channel")
-        try:
-            if cid is not None: await db.aset_channel_watermark(cid,c.from_user.id,w)
-            else: await db.aset_user_watermark(c.from_user.id,w)
-        except Exception as e: await c.answer(str(e), show_alert=True); return
-        await state.clear(); await c.answer("Сохранено")
-        await c.message.edit_text("✅ Логотип сохранён и будет применяться к новым видео.", reply_markup=friendly_main_menu(c.from_user.id))
+        if cid is not None:
+            if not any(x["channel_id"] == cid for x in await db.alist_channels(c.from_user.id)): await c.answer("Канал больше не подключён",show_alert=True); return
+            await db.aset_channel_watermark(cid,c.from_user.id,w)
+        else:
+            await db.aset_user_watermark(c.from_user.id,w)
+        await state.clear(); await c.answer("Сохранено"); await c.message.edit_text("✅ Логотип сохранён и будет применяться к новым видео.",reply_markup=friendly_main_menu(c.from_user.id))
 
     @router.callback_query(F.data == "logo_cancel")
-    async def logo_cancel(c, state):
+    async def logo_cancel(c,state):
         data=await state.get_data(); logo=data.get("logo_path")
         if logo: Path(str(logo)).unlink(missing_ok=True)
-        await state.clear(); await c.answer("Отменено"); await c.message.edit_text("Настройка логотипа отменена.", reply_markup=friendly_main_menu(c.from_user.id))
+        await state.clear(); await c.answer("Отменено"); await c.message.edit_text("Настройка логотипа отменена.",reply_markup=friendly_main_menu(c.from_user.id))
