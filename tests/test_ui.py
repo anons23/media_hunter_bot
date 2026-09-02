@@ -1,3 +1,4 @@
+import inspect
 import unittest
 
 from media_hunter_bot import handlers
@@ -16,19 +17,11 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("🔄 Рестарт моих задач", labels)
         self.assertNotIn("Admin", labels)
 
-    def test_main_menu_help_covers_all_base_actions(self):
-        expected = {
-            "download",
-            "upload",
-            "channels",
-            "wm",
-            "settings",
-            "premium",
-            "restart",
-            "admin",
-        }
-        self.assertTrue(expected.issubset(wm_wizard._MAIN_MENU_INFO))
-        self.assertNotIn("Premium", wm_wizard._MAIN_MENU_INFO["premium"])
+    def test_main_menu_navigation_does_not_send_stale_info_messages(self):
+        source = inspect.getsource(wm_wizard._MainMenuInfoMiddleware)
+        self.assertNotIn("_MAIN_MENU_INFO", source)
+        self.assertNotIn("answer(info", source)
+        self.assertIn("edit_text", source)
 
     def test_watermark_labels_are_russian(self):
         color_labels = [label for _, label in wm_wizard.COLORS]
@@ -40,14 +33,6 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("↘ Низ справа", position_labels)
         self.assertIn("Маленький — 20%", logo_size_labels)
         self.assertNotIn("Watermark", color_labels + font_labels + position_labels)
-
-    def test_watermark_help_explains_global_scope(self):
-        self.assertIn("личный водяной знак", wm_wizard._MAIN_MENU_INFO["wm"])
-        self.assertIn("отдельно", wm_wizard._MAIN_MENU_INFO["wm"])
-        self.assertIn("водяной знак", wm_wizard._MAIN_MENU_INFO["channels"])
-
-    def test_upload_help_is_device_video(self):
-        self.assertIn("с телефона или компьютера", wm_wizard._MAIN_MENU_INFO["upload"])
 
 
 if __name__ == "__main__":
