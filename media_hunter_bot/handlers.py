@@ -70,6 +70,7 @@ from .processor import (
     cleanup_media,
     cleanup_logos,
     download,
+    safe_media_filename
     ffprobe,
     metadata,
     playlist_items,
@@ -409,10 +410,11 @@ class Engine:
                 await progress.start()
                 await progress.advance("download")
                 source_url = items[0] if len(items) == 1 else j.url
-                source = await asyncio.to_thread(download, source_url, work, register)
+                source, media_title = await asyncio.to_thread(download, source_url, work, register)
             else:
                 await progress.start()
                 source = j.source
+                media_title = "video"
             if not source or not source.exists():
                 raise RuntimeError("Исходный файл не найден")
             if j.generation != self.gen.get(j.uid, 0):
@@ -477,7 +479,7 @@ class Engine:
                 )
 
             meta = await asyncio.to_thread(metadata, source)
-            caption = str(meta.get("description") or meta.get("title") or "")[:900]
+            caption = str(meta.get("description") or media_title or meta.get("title") or "")[:900]
             if oversized:
                 caption += (
                     f"\n\nℹ️ Файл больше {MAX_UNIQUE_SIZE_MB} МБ, "
@@ -493,7 +495,7 @@ class Engine:
                 await progress.cancel()
                 return
             await progress.advance("send")
-            await self._send_private(j.uid, result, caption)
+            await self._send_private(j.uid, result, caption, filename=safe_media_filename(media_title, result.suffix or ".mp4"))
             await progress.complete()
             for ch in await db.alist_channels(j.uid):
                 if not ch["enabled"]:
@@ -510,7 +512,7 @@ class Engine:
                             if (await asyncio.to_thread(cr.stat)).st_size > MAX_SEND_MB * 1024 * 1024:
                                 raise RuntimeError(f"После сжатия файл для канала всё ещё превышает лимит отправки {MAX_SEND_MB} МБ")
                     if cr.suffix.lower() == ".mp3":
-                        await self.bot.send_audio(ch["channel_id"], FSInputFile(cr))
+                        await self.bot.send_audio(ch["channel_id"], FSInputFile(cr, filename=safe_media_filename(media_title, cr.suffix or ".mp3")))
                     else:
                         await self.bot.send_video(ch["channel_id"], FSInputFile(cr), caption=caption or None, supports_streaming=True)
                 except Exception as e:
@@ -552,11 +554,12 @@ class Engine:
                     await asyncio.to_thread(shutil.rmtree, upload_root, ignore_errors=True)
             await asyncio.to_thread(shutil.rmtree, work, ignore_errors=True)
 
-    async def _send_private(self, uid: int, path: Path, caption: str):
+    async def _send_private(self, uid: int, path: Path, caption: str, filename: str | None = None):
+        name = filename or safe_media_filename(path.stem, path.suffix or ".mp4")
         if path.suffix.lower() == ".mp3":
-            await self.bot.send_audio(uid, FSInputFile(path), caption=caption or None)
+            await self.bot.send_audio(uid, FSInputFile(path, filename=name), caption=caption or None)
         else:
-            await self.bot.send_video(uid, FSInputFile(path), caption=caption or None, supports_streaming=True)
+            await self.bot.send_video(uid, FSInputFile(path, filename=name), caption=caption or None, supports_streaming=True)
         ad = await db.aget_setting("ad_text", "")
         button = await db.aget_setting("ad_button", "")
         url = await db.aget_setting("ad_url", "")
