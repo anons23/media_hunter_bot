@@ -75,6 +75,27 @@ async def _patched_middleware_call(self, handler, event, data):
 _wm_wizard.register_wm_wizard = _patched_register_wm_wizard
 _wm_wizard._MainMenuInfoMiddleware.__call__ = _patched_middleware_call
 
+# Clear the old Telegram command menu. The mobile Telegram "Menu" button is
+# populated by Bot API commands, not by the inline keyboard in menu().
+# Clearing the default command scope removes legacy entries such as Hunter
+# method, autopost and Premium that were left from the previous version.
+from aiogram import Bot as _Bot
+
+_original_bot_get_me = _Bot.get_me
+
+
+async def _get_me_and_clear_legacy_commands(self, *args, **kwargs):
+    result = await _original_bot_get_me(self, *args, **kwargs)
+    try:
+        await self.delete_my_commands()
+    except Exception:
+        # A temporary API error must not prevent the bot from starting.
+        pass
+    return result
+
+
+_Bot.get_me = _get_me_and_clear_legacy_commands
+
 # Keep these processing callables alive: _cached_process_entry is invoked later
 # by handlers/wm_wizard in a worker thread and resolves them from its globals.
 # Deleting them here causes production-only NameError after the service starts.
