@@ -105,15 +105,27 @@
 - ⬜ Production smoke test video + logo.
 
 ## Регрессия process_media wrapper — 2026-09-02
-- Production smoke test после деплоя показал `TypeError: <lambda>() takes 3 positional arguments but 6 were given` в `wm_wizard.py:148`.
+- Первый production smoke test после deploy показал `TypeError: <lambda>() takes 3 positional arguments but 6 were given` в `wm_wizard.py:148`.
 - Причина: bootstrap cache wrapper в `__init__.py` объявлял `audio_only`, `compress`, `register` только keyword-only, а watermark wrapper вызывает `process_media` позиционно шестью аргументами.
-- Логотип при этом уже загружается успешно; падение происходит на этапе запуска обработки.
+- Логотип при этом уже загружался успешно; падение происходило на этапе запуска обработки.
 - ✅ Заменён lambda на `_cached_process_entry(...)`, принимающий legacy positional вызов и передающий параметры в cache именованно.
-- ✅ Добавлен regression test, проверяющий, что эти три аргумента не являются keyword-only.
 - Commit: `eac7b433970f4136ecbd53b5edf591b1b9dfb989`.
 - Commit test: `c190963d167c633acd9c11956664ae1a7898bf9d`.
-- ⬜ Production повторно проверить `Моё видео` и YouTube.
-- ⬜ Production проверить video+logo.
+- CI на эти изменения ранее был зелёным.
+
+## Новый production bug: удалённые runtime globals — 2026-09-02
+- После deploy branch head `ef86b3d8f85751d8af5c8b6b5165adbae8235daf` production повторно упал при запуске обработки.
+- Первый traceback: `TypeError: <lambda>() takes 3 positional arguments but 6 were given` был уже исправлен в коде, после restart он сменился на:
+  `NameError: name '_cached_process_media' is not defined. Did you mean: '_cached_process_entry'?`
+- Точная причина: `_cached_process_entry()` разрешает `_cached_process_media` и `_optimized_process_media` во время реального вызова, но внизу `__init__.py` обе переменные были удалены через `del`. Это было не покрыто предыдущим regression test, потому что тест проверял только сигнатуру.
+- ❌ Это production-only ошибка bootstrap-кода, не FFmpeg и не проблема уникализации.
+- ✅ Убрано удаление `_cached_process_media` и `_optimized_process_media`; добавлен regression test, который реально вызывает `_cached_process_entry` шестью позиционными аргументами с подменёнными зависимостями и ловит NameError-класс регрессии.
+- Fix commit: `d82cb3c4c2d45f396831ccb9cd2ba16cb06174c9`.
+- Test commit: `7d76f3cb03917e0a14d8704189151f2ca267c1ae`.
+- ⬜ CI после этих commits.
+- ⬜ Production smoke test `Моё видео`.
+- ⬜ Production smoke test YouTube.
+- ⬜ Production smoke test video+logo.
 - ⬜ Production проверить autopost и отсутствие второго encode при совпадающем профиле.
 
 ## Tests / CI
@@ -124,9 +136,11 @@
 - Run `33655342998` на `046fbb3e...` — ✅ success.
 - Run `33655394965` на `bc8f2e37...` — Local Bot API regression.
 - Run `33655799262` на `1fab8a9a...` — ✅ success.
-- ⬜ CI для новых commits `eac7b433...` и `c190963d...`.
+- ⬜ CI для commits `d82cb3c4...`, `7d76f3cb...`.
 
 ## Последние commits
+- `7d76f3cb03917e0a14d8704189151f2ca267c1ae` — Test process wrapper runtime dependencies.
+- `d82cb3c4c2d45f396831ccb9cd2ba16cb06174c9` — Fix process wrapper runtime globals.
 - `c190963d167c633acd9c11956664ae1a7898bf9d` — Add regression test for process wrapper arguments.
 - `eac7b433970f4136ecbd53b5edf591b1b9dfb989` — Fix process_media wrapper positional arguments.
 - `a26db9ec361e2fa9bd58be3ccd069e9894fd7838` — Avoid duplicate media processing for identical watermark profiles.
@@ -135,7 +149,7 @@
 - `046fbb3efc38873deb07df28ca07249b96a66ac3` — Fix Local Bot API file downloads.
 
 ## Handoff
-1. ⬜ CI для текущего head (`c190963d...`).
+1. ⬜ CI для текущего head (`7d76f3cb...`).
 2. ⬜ Deploy branch head to VPS и restart `media-hunter.service`.
 3. ⬜ Проверить `Моё видео`.
 4. ⬜ Проверить YouTube.
