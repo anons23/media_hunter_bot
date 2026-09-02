@@ -8,16 +8,21 @@ from .optimized_processor import process_media as _optimized_process_media
 from .unique_filter import unique_video_filters as _safe_unique_video_filters
 from .process_cache import cached_process_media as _cached_process_media
 
+
+def _cached_process_entry(source, work, watermark, audio_only=False, compress=False, register=None):
+    return _cached_process_media(
+        _optimized_process_media,
+        source,
+        work,
+        watermark,
+        audio_only=audio_only,
+        compress=compress,
+        register=register,
+    )
+
+
 _processor._unique_video_filters = _safe_unique_video_filters
-_processor.process_media = lambda source, work, watermark, *, audio_only=False, compress=False, register=None: _cached_process_media(
-    _optimized_process_media,
-    source,
-    work,
-    watermark,
-    audio_only=audio_only,
-    compress=compress,
-    register=register,
-)
+_processor.process_media = _cached_process_entry
 
 # Local Bot API returns absolute filesystem paths from getFile(). Tell aiogram
 # to consume those paths locally instead of requesting /file/botTOKEN/<path>.
