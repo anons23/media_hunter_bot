@@ -117,7 +117,6 @@
 - ⬜ Добавить отдельный regression test, который явно фиксирует количество `process_media` вызовов для private-send/channel сценариев.
 
 ## CI
-
 Workflow: `.github/workflows/tests.yml`.
 - Trigger: push/PR в `Media_hanter-v3-security` + manual dispatch.
 - Install dependencies → compile → `unittest discover`.
@@ -139,6 +138,18 @@ Workflow: `.github/workflows/tests.yml`.
 - Post cleanup: ✅
 
 Финальный green CI подтверждён для полного восстановленного `handlers.py` + текущих UI tests.
+
+## Исправление FFmpeg уникализации 2026-09-02
+- Аудит подтвердил опасное место в `_unique_video_filters()`: старые дробные `scale=iw*0.998:ih*0.998` и обратный scale могли округлять размеры вертикального видео до нечётных значений перед `libx264`.
+- Это воспроизводимо на типичных размерах вроде 720×1280: промежуточный размер мог стать 719×1279; `libx264` с `yuv420p` может отказать с `width not divisible by 2`.
+- Код `processor.py` намеренно не переписывался массово после предыдущей неудачной замены `handlers.py`.
+- ✅ Добавлен `media_hunter_bot/unique_filter.py` с безопасным FFmpeg expression, который после обеих стадий scale явно округляет ширину/высоту к ближайшему меньшему чётному значению.
+- ✅ Существующий `processor.process_media()` использует новый фильтр через безопасное bootstrap-переопределение в `media_hunter_bot/__init__.py`; остальной processor/handlers не переписывался.
+- ✅ Добавлен `tests/test_media_uniqueness.py`: проверяет подключение безопасного фильтра и чётность размеров для типичных вертикальных входов.
+- Commits: `a30907ac9cd57fdf97047812f39f23dc8753f58b`, `5906c9e10eadd76126a3b678aa57d95fa53d6ef4`, `fa5b9708b59470d855a5742791d23a15f822790e`, `bc7e498f880c29b6330c5eef43192ed91fe9e18e`.
+- ⚠️ На момент записи этого раздела новый CI для `bc7e498f...` ещё выполнялся; production deployment не подтверждён.
+- ⬜ После green CI сделать VPS smoke test на реальном TikTok/YouTube ролике <=100 MB.
+- ⬜ После smoke test проверить отсутствие повторной обработки и размер/отправку результата.
 
 ## Что осталось сделать
 - ⬜ Runtime Telegram smoke test UI: перейти `Каналы` → `Водяной знак` → другие разделы и убедиться, что старое описание не остаётся снизу.
