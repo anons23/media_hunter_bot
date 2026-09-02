@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import socket
-import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -327,6 +326,21 @@ def _logo_path(wm: dict[str, Any]) -> Path | None:
     return p
 
 
+def _unique_video_filters() -> str:
+    """Light fingerprint change without mirroring/flipping.
+
+    Platforms see a re-encoded file that is not a byte-identical copy.
+    Changes are subtle: tiny scale bounce, mild color/noise, no hflip.
+    """
+    return (
+        "scale=iw*0.998:ih*0.998,"
+        "scale=iw*1.002004:ih*1.002004,"
+        "eq=contrast=1.012:brightness=0.004:saturation=1.015,"
+        "unsharp=3:3:0.4:3:3:0.0,"
+        "noise=alls=1:allf=t"
+    )
+
+
 def process_media(source: Path, work_dir: Path, watermark: dict[str, Any], audio_only: bool, compress: bool, register: Callable[[Any], None]) -> Path:
     if audio_only:
         output = work_dir / "output.mp3"
@@ -334,22 +348,37 @@ def process_media(source: Path, work_dir: Path, watermark: dict[str, Any], audio
     else:
         logo = _logo_path(watermark) if watermark.get("type") == "image" else None
         has_text = watermark.get("type") == "text" and bool(watermark.get("text"))
-        if source.suffix.lower() == ".mp4" and not compress and not logo and not has_text:
-            output = work_dir / "output.mp4"
-            shutil.copy2(source, output)
-            return output
+        # Always re-encode for uniqueness (no plain copy). Applies to all ≤100 MB jobs from handlers.
         output = work_dir / "output.mp4"
         cmd = ["ffmpeg", "-y", "-i", str(source)]
         if logo:
             cmd += ["-i", str(logo)]
-        cmd += ["-c:v", "libx264", "-threads", "1", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"]
+        cmd += [
+            "-c:v", "libx264",
+            "-threads", "1",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            "-map_metadata", "-1",
+            "-metadata", "comment=media_hunter",
+        ]
         cmd += ["-crf", "28", "-preset", "fast"] if compress else ["-crf", "23", "-preset", "medium"]
+        base_vf = _unique_video_filters()
         if logo:
-            cmd += ["-filter_complex", f"[0:v][1:v]overlay={_positions_overlay(str(watermark.get('position', 'br')))}[v]", "-map", "[v]", "-map", "0:a?", "-shortest"]
-        elif has_text:
-            text_filter = _build_text_filter(watermark, work_dir)
-            if text_filter:
-                cmd += ["-vf", text_filter]
+            # Uniqueize first, then overlay logo (no mirror).
+            fc = (
+                f"[0:v]{base_vf}[base];"
+                f"[base][1:v]overlay={_positions_overlay(str(watermark.get('position', 'br')))}[v]"
+            )
+            cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a?", "-shortest"]
+        else:
+            vf_parts = [base_vf]
+            if has_text:
+                text_filter = _build_text_filter(watermark, work_dir)
+                if text_filter:
+                    vf_parts.append(text_filter)
+            # Slight audio gain so audio stream is not identical either.
+            cmd += ["-vf", ",".join(vf_parts), "-af", "volume=1.01"]
         cmd.append(str(output))
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
         register(proc)
