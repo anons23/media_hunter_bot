@@ -123,27 +123,230 @@ Telegram-бот Media Hunter: Python + aiogram 3.x + yt-dlp + ffmpeg + SQLite.
   - повторная выдача корректно продлевает grant;
   - обычный пользователь не получает admin callback access.
 
-## 7. Серверный deployment plan
+## 7. Сервер: точные пути, имена сервисов и устройство запуска
 
-### Git / backup
+> **Критически важно для другого ИИ:** на VPS имя systemd-сервиса — `media-hunter.service` (с дефисом), а не `mediahunter.service`. Все команды ниже должны использовать именно `media-hunter`.
 
-- ⬜ Проверить `git remote -v` на сервере: желательно SSH remote `git@github.com:anons23/media_hunter_bot.git`.
-- ⬜ Проверить `git branch --show-current`, `git status`, `git log -1 --oneline`.
-- ⬜ Сделать backup текущего `/opt/mediahunter/app` перед обновлением.
-- ⬜ Забрать `origin/Media_hanter-v3-security` и переключить сервер на этот commit.
+### 7.1 Основные пути VPS
 
-### Environment / service
+- Корень приложения: `/opt/mediahunter/app`
+- Главный запуск бота: `/opt/mediahunter/app/main.py`
+- Виртуальное окружение Python: `/opt/mediahunter/venv`
+- Python production: `/opt/mediahunter/venv/bin/python`
+- yt-dlp находится в: `/opt/mediahunter/venv/bin/yt-dlp`
+- Конфигурация окружения: `/opt/mediahunter/app/.env`
+- Данные приложения: `/opt/mediahunter/app/data`
+- Медиа приложения: `/opt/mediahunter/app/media`
+- Дополнительные рабочие данные: `/opt/mediahunter/data`
+- Дополнительный рабочий каталог: `/opt/mediahunter/work`
+- Systemd unit-файл: `/etc/systemd/system/media-hunter.service`
+- Локальный Telegram Bot API: `127.0.0.1:8081`
 
-- ✅ Бот запускается отдельным пользователем `mediahunter` (`nologin`).
-- ✅ Systemd sandbox: `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome`, kernel/capability restrictions и writable paths.
-- ✅ Local Bot API: `127.0.0.1:8081`.
-- ✅ UFW: incoming default deny, SSH разрешён, outgoing allow.
-- ✅ Ранее исправлен PATH сервиса для `/opt/mediahunter/venv/bin`, где находится `yt-dlp`.
-- ⬜ После deployment проверить `systemctl status mediahunter`.
-- ⬜ Проверить `journalctl -u mediahunter -n 100 --no-pager`.
-- ⬜ Проверить, что сервис реально запускает актуальный commit и `yt-dlp` доступен.
+### 7.2 Пользователь и systemd
 
-### Runtime smoke tests после deployment
+Бот запускается не от `root`, а от отдельного системного пользователя:
+- `User=mediahunter`
+- `Group=mediahunter`
+- shell пользователя — `nologin`
+
+Текущий точный unit `/etc/systemd/system/media-hunter.service`:
+
+```ini
+[Unit]
+Description=Media Hunter Telegram Bot
+After=network-online.target telegram-bot-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+User=mediahunter
+Group=mediahunter
+
+WorkingDirectory=/opt/mediahunter/app
+EnvironmentFile=/opt/mediahunter/app/.env
+Environment="PATH=/opt/mediahunter/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/opt/mediahunter/venv/bin/python /opt/mediahunter/app/main.py
+
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+MemoryDenyWriteExecute=true
+
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+ReadWritePaths=/opt/mediahunter/app/data
+ReadWritePaths=/opt/mediahunter/app/media
+ReadWritePaths=/opt/mediahunter/data
+ReadWritePaths=/opt/mediahunter/work
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### 7.3 Что делает systemd unit
+
+- После запуска сети ждёт `network-online.target`.
+- Также зависит от `telegram-bot-api.service` через `After=`.
+- Работает от пользователя `mediahunter`.
+- Запускает именно `/opt/mediahunter/venv/bin/python /opt/mediahunter/app/main.py`.
+- Использует `.env` из `/opt/mediahunter/app/.env`.
+- Добавляет `/opt/mediahunter/venv/bin` в `PATH`, поэтому системный запуск видит `yt-dlp`.
+- При падении автоматически перезапускается: `Restart=always`, пауза `RestartSec=5`.
+- Включён при загрузке системы: unit имеет `enabled`.
+
+### 7.4 Systemd hardening
+
+Unit уже включает sandbox/hardening:
+- `NoNewPrivileges=true`
+- `PrivateTmp=true`
+- `ProtectSystem=strict`
+- `ProtectHome=true`
+- `ProtectKernelTunables=true`
+- `ProtectKernelModules=true`
+- `ProtectKernelLogs=true`
+- `ProtectControlGroups=true`
+- `RestrictSUIDSGID=true`
+- `LockPersonality=true`
+- `RestrictRealtime=true`
+- `MemoryDenyWriteExecute=true`
+- пустые `CapabilityBoundingSet=` и `AmbientCapabilities=`
+
+Запись разрешена только в явно перечисленные директории через `ReadWritePaths`.
+
+### 7.5 Правильные команды управления сервисом
+
+Правильное имя:
+
+```bash
+systemctl status media-hunter --no-pager
+systemctl restart media-hunter
+systemctl stop media-hunter
+systemctl start media-hunter
+systemctl enable media-hunter
+systemctl disable media-hunter
+journalctl -u media-hunter -n 100 --no-pager
+```
+
+**Не использовать:** `systemctl status mediahunter` или `systemctl restart mediahunter` — такого unit на текущем VPS нет.
+
+### 7.6 Текущий фактический статус на 2026-09-02
+
+Проверка показала:
+- `media-hunter.service` существует.
+- Unit загружен и `enabled`.
+- На момент проверки статус: `Active: active (running)`.
+- Main PID: `359979`.
+- Процесс: `/opt/mediahunter/venv/bin/python /opt/mediahunter/app/main.py`.
+- Потребление на момент проверки: ~132.9 MB RAM.
+
+**Важно:** systemd показал `restart count` около **9401**. Это означает, что сервис до текущего запуска многократно перезапускался. Нельзя считать серверный запуск полностью подтверждённым только по `Active: running`; необходимо посмотреть полный `journalctl` и найти причину предыдущих падений.
+
+Следующая диагностическая команда:
+
+```bash
+journalctl -u media-hunter -n 200 --no-pager -o cat
+```
+
+Также полезно:
+
+```bash
+systemctl status media-hunter -l --no-pager
+```
+
+### 7.7 Firewall / сеть
+
+Текущая модель firewall:
+- UFW используется.
+- Входящие соединения: default **deny**.
+- SSH порт 22 разрешён.
+- Исходящий трафик: **allow**.
+
+Следствие: firewall защищает вход на VPS, но сейчас не является полноценной process-specific egress изоляцией для `mediahunter`. Это важно именно из-за остаточного SSRF-рискa: `yt-dlp` запускается отдельным subprocess и сам выполняет сетевые соединения.
+
+### 7.8 Bot API
+
+Локальный Telegram Bot API работает на:
+
+```text
+127.0.0.1:8081
+```
+
+Он не должен рассматриваться как публичный endpoint для интернета.
+
+### 7.9 Рекомендуемый порядок обновления production
+
+1. Проверить серверные состояние и git:
+
+```bash
+cd /opt/mediahunter/app
+git remote -v
+git branch --show-current
+git status
+git log -1 --oneline
+```
+
+2. Перед изменением сделать backup:
+
+```bash
+sudo cp -a /opt/mediahunter/app /opt/mediahunter/app_backup_$(date +%Y%m%d_%H%M%S)
+```
+
+3. Проверить SSH remote (предпочтительно):
+
+```text
+git@github.com:anons23/media_hunter_bot.git
+```
+
+4. Синхронизировать нужную ветку:
+
+```bash
+cd /opt/mediahunter/app
+git fetch origin
+git checkout Media_hanter-v3-security
+git reset --hard origin/Media_hanter-v3-security
+```
+
+5. Установить production-зависимости:
+
+```bash
+/opt/mediahunter/venv/bin/python -m pip install -r media_hunter_bot/requirements.txt
+```
+
+6. Проверить компиляцию:
+
+```bash
+/opt/mediahunter/venv/bin/python -m py_compile media_hunter_bot/processor.py media_hunter_bot/handlers.py media_hunter_bot/db.py media_hunter_bot/config.py main.py
+```
+
+7. Перезапустить **правильный** сервис:
+
+```bash
+systemctl restart media-hunter
+systemctl status media-hunter -l --no-pager
+```
+
+8. Сразу смотреть логи:
+
+```bash
+journalctl -u media-hunter -n 200 --no-pager -o cat
+```
+
+9. Только после успешного старта делать runtime smoke tests.
+
+### 7.10 Smoke tests после deployment
 
 - ⬜ `/start` и главное меню.
 - ⬜ Скачать видео по ссылке.
@@ -161,12 +364,18 @@ Telegram-бот Media Hunter: Python + aiogram 3.x + yt-dlp + ffmpeg + SQLite.
 
 Приложение само блокирует известные private/loopback назначения, но DNS rebinding и redirect-to-internal остаются остаточным риском, поскольку конечное сетевое соединение выполняет `yt-dlp` в subprocess. Production security требует unprivileged user + сетевую изоляцию/egress rules.
 
+UFW с разрешённым outgoing-трафиком этот риск полностью не устраняет: он контролирует firewall-правила VPS, но не ограничивает конкретно только процесс `mediahunter`.
+
 ## 9. Последняя точка продолжения для другого ИИ
 
 **Рабочая ветка:** `Media_hanter-v3-security`.
 
-**Последний известный commit до обновления журнала:** `dbb6ecfbda90a0d1a18c04fd4b0c3319a9905813`.
+**Главная задача сейчас:**
+1. Проверить свежий green CI.
+2. Проверить `media-hunter.service` по полным логам.
+3. Разобраться с историческим `restart count ≈ 9401`, прежде чем считать production runtime полностью здоровым.
+4. После этого синхронизировать правильный commit на VPS и провести smoke-test.
 
-**Главная задача сейчас:** подтвердить green CI после transactional Premium fix, затем синхронизировать этот commit на VPS и провести smoke-test. `DEVELOPMENT_LOG.md` на сервер не копировать.
+`DEVELOPMENT_LOG.md` на сервер не копировать.
 
 При каждом успешном важном изменении обновлять этот файл: кратко что сделано → commit → статус `✅`. Для планов использовать `⬜` до фактической проверки.
