@@ -12,9 +12,13 @@ class UiRegressionTests(unittest.TestCase):
             for row in handlers.menu(123).inline_keyboard
             for button in row
         ]
+        self.assertIn("📥 Скачать", labels)
         self.assertIn("📤 Моё видео", labels)
+        self.assertIn("📺 Каналы", labels)
         self.assertIn("⭐ Premium", labels)
         self.assertIn("🔄 Рестарт моих задач", labels)
+        self.assertNotIn("💧 Водяной знак", labels)
+        self.assertNotIn("⚙️ Настройки", labels)
         self.assertNotIn("Admin", labels)
 
     def test_main_menu_navigation_does_not_send_stale_info_messages(self):
@@ -22,6 +26,11 @@ class UiRegressionTests(unittest.TestCase):
         self.assertNotIn("_MAIN_MENU_INFO", source)
         self.assertNotIn("answer(info", source)
         self.assertIn("edit_text", source)
+
+    def test_channel_watermark_middleware_does_not_overwrite_screen(self):
+        source = inspect.getsource(wm_wizard._MainMenuInfoMiddleware.__call__)
+        self.assertNotIn('startswith("cwmx:")', source)
+        self.assertNotIn('startswith("ch:")', source)
 
     def test_watermark_labels_are_russian(self):
         color_labels = [label for _, label in wm_wizard.COLORS]
