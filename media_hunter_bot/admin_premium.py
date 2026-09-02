@@ -97,43 +97,44 @@ def _grant_sync(user_id: int, days: int) -> str:
         return grant_until
 
 
-def _paid_premium_until_sync(user_id: int) -> datetime | None:
+def _revoke_sync(user_id: int) -> bool:
+    """Revoke a manual grant without losing payments made during the grant.
+
+    BEGIN IMMEDIATE serializes this read/restore/delete sequence with other
+    SQLite writers, so a payment cannot be committed between reading the
+    payment history and restoring users.premium_until.
+    """
     _ensure_table()
     now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
     with db._db() as c:
-        rows = c.execute(
-            "SELECT created_at, days FROM payments WHERE user_id=? ORDER BY created_at, id",
-            (user_id,),
-        ).fetchall()
-    paid_until: datetime | None = None
-    for row in rows:
-        created = _parse_dt(row["created_at"]) or now
-        base = paid_until if paid_until and paid_until > created else created
-        paid_until = base + timedelta(days=int(row["days"] or 0))
-    return paid_until
-
-
-def _revoke_sync(user_id: int) -> bool:
-    _ensure_table()
-    with db._db() as c:
+        c.execute("BEGIN IMMEDIATE")
         grant = c.execute(
             "SELECT base_until FROM admin_premium_grants WHERE user_id=?",
             (user_id,),
         ).fetchone()
         if not grant:
             return False
+
         base_until = _parse_dt(grant["base_until"])
-    paid_until = _paid_premium_until_sync(user_id)
-    now = datetime.now(timezone.utc)
-    restored = max(
-        [dt for dt in (base_until, paid_until) if dt is not None],
-        default=None,
-    )
-    restored_raw = restored.isoformat() if restored and restored > now else None
-    with db._db() as c:
+        rows = c.execute(
+            "SELECT created_at, days FROM payments WHERE user_id=? ORDER BY created_at, id",
+            (user_id,),
+        ).fetchall()
+        paid_until: datetime | None = None
+        for row in rows:
+            created = _parse_dt(row["created_at"]) or now
+            base = paid_until if paid_until and paid_until > created else created
+            paid_until = base + timedelta(days=int(row["days"] or 0))
+
+        restored = max(
+            [dt for dt in (base_until, paid_until) if dt is not None],
+            default=None,
+        )
+        restored_raw = restored.isoformat() if restored and restored > now else None
         c.execute(
             "UPDATE users SET premium_until=?, updated_at=? WHERE user_id=? AND permanent_premium=0",
-            (restored_raw, now.isoformat(), user_id),
+            (restored_raw, now_iso, user_id),
         )
         c.execute("DELETE FROM admin_premium_grants WHERE user_id=?", (user_id,))
     return True
