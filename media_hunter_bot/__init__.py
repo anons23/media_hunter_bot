@@ -12,4 +12,4 @@ from .unique_filter import unique_video_filters as _safe_unique_video_filters
 _processor._unique_video_filters = _safe_unique_video_filters
 
 del _processor
- del _safe_unique_video_filters
+del _safe_unique_video_filters
