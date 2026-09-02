@@ -10,6 +10,22 @@ from .unique_filter import unique_video_filters as _safe_unique_video_filters
 _processor._unique_video_filters = _safe_unique_video_filters
 _processor.process_media = _optimized_process_media
 
+# Local Bot API returns absolute filesystem paths from getFile(). Tell aiogram
+# to consume those paths locally instead of requesting /file/botTOKEN/<path>.
+# This must happen before handlers.py constructs its AiohttpSession.
+from aiogram.client.telegram import TelegramAPIServer as _TelegramAPIServer
+
+_original_api_from_base = _TelegramAPIServer.from_base
+
+
+@classmethod
+def _local_api_from_base(cls, base, **kwargs):
+    kwargs.setdefault("is_local", True)
+    return _original_api_from_base(base, **kwargs)
+
+
+_TelegramAPIServer.from_base = _local_api_from_base
+
 # Keep only channel watermark controls in the UI. Format selection remains
 # available from the Download screen, so the separate Settings button is not
 # needed. Also disable the old middleware's post-handler menu mutation: it
@@ -48,4 +64,5 @@ _wm_wizard._MainMenuInfoMiddleware.__call__ = _patched_middleware_call
 del _processor
 del _optimized_process_media
 del _safe_unique_video_filters
+del _TelegramAPIServer
 del _wm_wizard
