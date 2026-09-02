@@ -11,6 +11,7 @@ from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, Inli
 
 from . import db
 from .config import ADMIN_ID, MEDIA_DIR
+from .admin_premium import register_admin_premium
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,8 @@ def register_opp_admin(router: Router, menu_fn) -> None:
 
     def menu_fn(uid: int) -> InlineKeyboardMarkup:
         return _friendly_menu(base_menu_fn, uid)
+
+    register_admin_premium(router)
 
     @router.callback_query(F.data == "aopp_reports")
     async def aopp_reports(c: CallbackQuery, state: FSMContext):
