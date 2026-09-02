@@ -55,6 +55,16 @@ class AdminPremiumTests(unittest.TestCase):
                 restored = datetime.fromisoformat(row[0])
                 self.assertGreaterEqual(restored, paid_until)
 
+    def test_revoke_reads_payments_inside_immediate_transaction(self):
+        source = Path(admin_premium.__file__).read_text(encoding="utf-8")
+        revoke_src = source[source.index("def _revoke_sync"):source.index("def _list_sync")]
+        self.assertIn('c.execute("BEGIN IMMEDIATE")', revoke_src)
+        payments_pos = revoke_src.index('SELECT created_at, days FROM payments')
+        update_pos = revoke_src.index('UPDATE users SET premium_until', payments_pos)
+        delete_pos = revoke_src.index('DELETE FROM admin_premium_grants', update_pos)
+        self.assertLess(payments_pos, update_pos)
+        self.assertLess(update_pos, delete_pos)
+
     def test_grant_rejects_unknown_user(self):
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "test.db"
