@@ -1,7 +1,7 @@
 """Interactive Russian watermark setup via inline buttons."""
 from __future__ import annotations
 
-from aiogram import F, Router
+from aiogram import BaseMiddleware, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -9,7 +9,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from . import db
 from .processor import _is_valid_color
 
-# Internal codes stay English for FFmpeg; UI is Russian.
+# Internal codes stay English for FFmpeg/callbacks; UI is Russian.
 COLORS = [
     ("white", "⬜ Белый"),
     ("black", "⬛ Чёрный"),
@@ -61,6 +61,64 @@ COLOR_RU = dict(COLORS)
 FONT_RU = dict(FONTS)
 
 
+_MAIN_MENU_TEXT = {
+    "upload": "📤 Загрузить видео",
+    "premium": "⭐ Премиум",
+    "restart": "🔄 Отменить мои задачи",
+    "admin": "👑 Админка",
+}
+
+_MAIN_MENU_INFO = {
+    "download": "📥 <b>Скачать</b>\n\nПришлите ссылку на видео из YouTube, TikTok или Instagram. Бот скачает его, обработает и отправит вам готовый файл.",
+    "upload": "📤 <b>Загрузить видео</b>\n\nЗдесь можно отправить боту уже имеющийся видеофайл. Он обработает его так же, как видео по ссылке.",
+    "channels": "📺 <b>Каналы</b>\n\nПодключайте свои Telegram-каналы для автоматической публикации обработанных видео. Для каждого канала можно отдельно настроить автопост и водяной знак.",
+    "wm": "💧 <b>Водяной знак</b>\n\nНастройте текстовую надпись или логотип: текст, цвет, шрифт, размер, положение и прозрачность. Настройка применяется к новым обработанным видео.",
+    "settings": "⚙️ <b>Настройки</b>\n\nВыберите, что получать после обработки: обычное видео или только аудио в формате MP3.",
+    "premium": "⭐ <b>Премиум</b>\n\nЗдесь можно купить Premium на выбранный срок. Премиум-задачи получают приоритет в очереди.",
+    "restart": "🔄 <b>Отменить мои задачи</b>\n\nОтменяются только ваши текущие и ожидающие задачи. Задачи других пользователей не затрагиваются.",
+    "admin": "👑 <b>Админка</b>\n\nРаздел управления ботом: ОПП, отчёты, реклама, Stars и служебные настройки.",
+}
+
+
+class _MainMenuInfoMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event: CallbackQuery, data: dict):
+        info = _MAIN_MENU_INFO.get(event.data or "")
+        if info and event.message:
+            try:
+                await event.message.answer(info, parse_mode="HTML")
+            except Exception:
+                pass
+        result = await handler(event, data)
+        if event.message and event.data == "wm":
+            try:
+                await event.message.edit_reply_markup(
+                    reply_markup=_kb(
+                        [
+                            [_B("📝 Текст", "wmtext")],
+                            [_B("🖼 Логотип", "wmlogo")],
+                            [_B("◀️ Назад", "back")],
+                        ]
+                    )
+                )
+            except Exception:
+                pass
+        elif event.message and (event.data or "").startswith("cwm:"):
+            try:
+                cid = (event.data or "").split(":", 1)[1]
+                await event.message.edit_reply_markup(
+                    reply_markup=_kb(
+                        [
+                            [_B("🔄 Автопост", f"toggle:{cid}"), _B("💧 Водяной знак", f"cwm:{cid}")],
+                            [_B("🗑 Удалить", f"del:{cid}")],
+                            [_B("◀️ Назад", "channels")],
+                        ]
+                    )
+                )
+            except Exception:
+                pass
+        return result
+
+
 class WmStates(StatesGroup):
     text = State()
 
@@ -75,6 +133,19 @@ def _B(text: str, data: str | None = None, url: str | None = None) -> InlineKeyb
 
 def _chunk(items: list, n: int) -> list[list]:
     return [items[i : i + n] for i in range(0, len(items), n)]
+
+
+def _friendly_menu(menu_fn, uid: int) -> InlineKeyboardMarkup:
+    """Return the existing main menu with only visible English labels translated."""
+    original = menu_fn(uid)
+    rows: list[list[InlineKeyboardButton]] = []
+    for row in original.inline_keyboard:
+        new_row: list[InlineKeyboardButton] = []
+        for button in row:
+            label = _MAIN_MENU_TEXT.get(button.callback_data, button.text)
+            new_row.append(InlineKeyboardButton(text=label, callback_data=button.callback_data, url=button.url))
+        rows.append(new_row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _summary(data: dict) -> str:
@@ -127,7 +198,12 @@ async def _save_watermark(uid: int, data: dict) -> None:
 
 
 def register_wm_wizard(router: Router, menu_fn) -> None:
-    """Register interactive watermark text wizard."""
+    """Register interactive watermark text wizard and friendly main-menu UI."""
+    base_menu_fn = menu_fn
+    router.callback_query.middleware(_MainMenuInfoMiddleware())
+
+    def menu_fn(uid: int) -> InlineKeyboardMarkup:
+        return _friendly_menu(base_menu_fn, uid)
 
     @router.callback_query(F.data.in_({"wmtext", "cwmtext"}))
     async def wm_start_text(c: CallbackQuery, state: FSMContext):
