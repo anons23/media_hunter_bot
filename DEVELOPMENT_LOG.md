@@ -76,6 +76,15 @@
 - ✅ Исправлен middleware, который после `cwmx:*` подменял клавиатуру и возвращал пользователя назад.
 - ⚠️ В проекте есть старые/новые участки watermark flow; не плодить новые дубликаты.
 
+## Telegram mobile command menu — 2026-09-02
+- Пользователь обнаружил отдельное меню Telegram в строке ввода рядом со скрепкой, где оставались старые команды предыдущей версии: `Плюсы Hunter метода`, `Автопостинг`, `Купить премиум`.
+- Это не inline-клавиатура `menu()` бота, а список команд Telegram Bot API.
+- ✅ В `media_hunter_bot/__init__.py` добавлена очистка default command scope через `bot.delete_my_commands()` после успешного `get_me()` и до polling.
+- Очистка выполняется автоматически при каждом старте, поэтому старые команды не должны возвращаться после перезапуска.
+- Изменение не затрагивает inline-кнопки, уникализацию, watermark, загрузку видео или автопостинг.
+- Commit: `59c20fb4ae8183e210c5521c1172640d5f1300a5`.
+- ⬜ После deploy проверить мобильное меню Telegram; если старые пункты останутся, проверить наличие отдельно заданных command scopes/languages в BotFather/API.
+
 ## Важная ошибка предыдущей попытки
 - ❌ Неполная массовая замена `handlers.py` вырезала существующую функциональность и вызвала CI ошибки (`MAX_USER_QUEUE`, `metadata`, UI).
 - ✅ Полный `handlers.py` восстановлен из рабочей точки `6842889`.
@@ -137,8 +146,10 @@
 - Run `33655394965` на `bc8f2e37...` — Local Bot API regression.
 - Run `33655799262` на `1fab8a9a...` — ✅ success.
 - ⬜ CI для commits `d82cb3c4...`, `7d76f3cb...`.
+- ⬜ CI для `59c20fb4...`.
 
 ## Последние commits
+- `59c20fb4ae8183e210c5521c1172640d5f1300a5` — Clear legacy Telegram command menu.
 - `7d76f3cb03917e0a14d8704189151f2ca267c1ae` — Test process wrapper runtime dependencies.
 - `d82cb3c4c2d45f396831ccb9cd2ba16cb06174c9` — Fix process wrapper runtime globals.
 - `c190963d167c633acd9c11956664ae1a7898bf9d` — Add regression test for process wrapper arguments.
@@ -149,12 +160,13 @@
 - `046fbb3efc38873deb07df28ca07249b96a66ac3` — Fix Local Bot API file downloads.
 
 ## Handoff
-1. ⬜ CI для текущего head (`7d76f3cb...`).
+1. ⬜ CI для текущего head (`59c20fb4...`).
 2. ⬜ Deploy branch head to VPS и restart `media-hunter.service`.
-3. ⬜ Проверить `Моё видео`.
-4. ⬜ Проверить YouTube.
-5. ⬜ Проверить PNG logo и video+logo.
-6. ⬜ Проверить enabled autopost.
-7. ⬜ Проверить, что одинаковый watermark не запускает второй FFmpeg.
-8. ⬜ Улучшить stderr logging FFmpeg.
-9. 🔐 Перевыпустить Bot Token через BotFather из-за раскрытия в логах.
+3. ⬜ Проверить мобильное меню Telegram — старые команды должны исчезнуть.
+4. ⬜ Проверить `Моё видео`.
+5. ⬜ Проверить YouTube.
+6. ⬜ Проверить PNG logo и video+logo.
+7. ⬜ Проверить enabled autopost.
+8. ⬜ Проверить, что одинаковый watermark не запускает второй FFmpeg.
+9. ⬜ Улучшить stderr logging FFmpeg.
+10. 🔐 Перевыпустить Bot Token через BotFather из-за раскрытия в логах.
