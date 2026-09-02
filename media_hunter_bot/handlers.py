@@ -80,6 +80,7 @@ from .processor import (
 from .progress import ProgressTracker
 from .opp_logic import opp_check
 from .opp_admin import register_opp_admin
+from .wm_wizard import register_wm_wizard
 from .user_errors import user_facing_error
 router = Router()
 logger = logging.getLogger(__name__)
@@ -153,6 +154,7 @@ def menu(uid: int) -> InlineKeyboardMarkup:
     return kb(rows)
 
 register_opp_admin(router, menu)
+register_wm_wizard(router, menu)
 
 
 def premium_menu() -> InlineKeyboardMarkup:
@@ -939,56 +941,6 @@ async def cwm(c: CallbackQuery, state: FSMContext):
     await state.update_data(cid=cid)
     await c.answer()
     await c.message.edit_text("💧 Watermark этого канала:", reply_markup=kb([[B("📝 Текст", "cwmtext")], [B("🖼 PNG", "cwmlogo")], [B("◀️ Назад", "channels")]]))
-
-
-@router.callback_query(F.data.in_({"wmtext", "cwmtext"}))
-async def wmtext(c: CallbackQuery, state: FSMContext):
-    cid = None if c.data == "wmtext" else (await state.get_data()).get("cid")
-    if cid is not None:
-        row = next((x for x in await db.alist_channels(c.from_user.id) if x["channel_id"] == cid), None)
-        if not row:
-            await c.answer("Канал не найден", show_alert=True)
-            return
-    await state.update_data(channel=cid)
-    await state.set_state(S.wm)
-    await c.answer()
-    await c.message.edit_text("Введите: ТЕКСТ|ПОЗИЦИЯ|РАЗМЕР|ЦВЕТ|ПРОЗРАЧНОСТЬ\nНапример: PRESTIGE|br|28|white|0.8", reply_markup=kb([[B("◀️ Назад", "wm" if cid is None else "channels")]]))
-
-
-@router.message(S.wm)
-async def wmvalue(m: Message, state: FSMContext):
-    if not m.text or not m.text.strip():
-        await m.answer("❌ Введите текст watermark.")
-        return
-    p = [x.strip() for x in m.text.split("|")]
-    if len(p) not in (1, 5):
-        await m.answer("Формат: ТЕКСТ|ПОЗИЦИЯ|РАЗМЕР|ЦВЕТ|ПРОЗРАЧНОСТЬ")
-        return
-    try:
-        text = p[0][:200]
-        position = p[1] if len(p) == 5 else "br"
-        size = int(p[2]) if len(p) == 5 else 28
-        color = p[3] if len(p) == 5 else "white"
-        opacity = float(p[4]) if len(p) == 5 else 0.8
-        if position not in {"tl", "tr", "bl", "br", "c"} or not 10 <= size <= 200 or not 0.05 <= opacity <= 1 or not _is_valid_color(color):
-            raise ValueError
-    except ValueError:
-        await m.answer("❌ Позиция tl/tr/bl/br/c; размер 10–200; прозрачность 0.05–1; цвет — имя или #RRGGBB.")
-        return
-    d = await state.get_data()
-    w = {"type": "text", "text": text, "position": position, "size": size, "color": color, "opacity": opacity}
-    cid = d.get("channel")
-    if cid:
-        row = next((x for x in await db.alist_channels(m.from_user.id) if x["channel_id"] == cid), None)
-        if not row:
-            await state.clear()
-            await m.answer("❌ Канал больше не подключён.", reply_markup=menu(m.from_user.id))
-            return
-        await db.aset_channel_watermark(cid, m.from_user.id, w)
-    else:
-        await db.aset_user_watermark(m.from_user.id, w)
-    await state.clear()
-    await m.answer("✅ Текстовый watermark сохранён.", reply_markup=menu(m.from_user.id))
 
 
 @router.callback_query(F.data.in_({"wmlogo", "cwmlogo"}))
