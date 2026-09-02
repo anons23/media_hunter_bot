@@ -42,6 +42,35 @@ class MediaUniquenessRegressionTests(unittest.TestCase):
         for name in ("audio_only", "compress", "register"):
             self.assertNotEqual(signature.parameters[name].kind, inspect.Parameter.KEYWORD_ONLY)
 
+    def test_cached_process_entry_resolves_runtime_dependencies(self):
+        import media_hunter_bot
+
+        calls = []
+        original_cache = media_hunter_bot._cached_process_media
+        original_processor = media_hunter_bot._optimized_process_media
+
+        def fake_cache(processor_fn, source, work, watermark, *, audio_only, compress, register):
+            calls.append((processor_fn, source, work, watermark, audio_only, compress, register))
+            return "ok"
+
+        def fake_processor(*args, **kwargs):
+            return "processed"
+
+        try:
+            media_hunter_bot._cached_process_media = fake_cache
+            media_hunter_bot._optimized_process_media = fake_processor
+            result = media_hunter_bot._cached_process_entry(
+                "source", "work", {"type": "text"}, False, True, "register"
+            )
+        finally:
+            media_hunter_bot._cached_process_media = original_cache
+            media_hunter_bot._optimized_process_media = original_processor
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0][0], fake_processor)
+        self.assertEqual(calls[0][1:], ("source", "work", {"type": "text"}, False, True, "register"))
+
     def test_identical_processing_profile_is_reused(self):
         from media_hunter_bot.process_cache import cached_process_media, clear
 
