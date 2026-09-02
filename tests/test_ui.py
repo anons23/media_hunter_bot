@@ -11,10 +11,9 @@ class UiRegressionTests(unittest.TestCase):
             for row in handlers.menu(123).inline_keyboard
             for button in row
         ]
-        self.assertIn("📤 Загрузить видео", labels)
-        self.assertIn("⭐ Премиум", labels)
-        self.assertIn("🔄 Отменить мои задачи", labels)
-        self.assertNotIn("Premium", labels)
+        self.assertIn("📤 Моё видео", labels)
+        self.assertIn("⭐ Premium", labels)
+        self.assertIn("🔄 Рестарт моих задач", labels)
         self.assertNotIn("Admin", labels)
 
     def test_main_menu_help_covers_all_base_actions(self):
