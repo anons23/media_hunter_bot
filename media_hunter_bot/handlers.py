@@ -70,7 +70,7 @@ from .processor import (
     cleanup_media,
     cleanup_logos,
     download,
-    safe_media_filename
+    safe_media_filename,
     ffprobe,
     metadata,
     playlist_items,
