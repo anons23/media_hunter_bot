@@ -1,4 +1,3 @@
-import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -12,16 +11,8 @@ from media_hunter_bot.config import ADMIN_ID
 
 class AdminPremiumTests(unittest.TestCase):
     def test_only_admin_gets_admin_button(self):
-        admin_buttons = [
-            b
-            for row in handlers.menu(ADMIN_ID).inline_keyboard
-            for b in row
-        ]
-        other_buttons = [
-            b
-            for row in handlers.menu(987654321).inline_keyboard
-            for b in row
-        ]
+        admin_buttons = [b for row in handlers.menu(ADMIN_ID).inline_keyboard for b in row]
+        other_buttons = [b for row in handlers.menu(987654321).inline_keyboard for b in row]
         self.assertIn("admin", {b.callback_data for b in admin_buttons})
         self.assertNotIn("admin", {b.callback_data for b in other_buttons})
 
@@ -39,7 +30,7 @@ class AdminPremiumTests(unittest.TestCase):
                     )
                     now = datetime.now(timezone.utc).isoformat()
                     c.execute(
-                        "INSERT INTO users(user_id,created_at,updated_at,premium_until) VALUES(?,?,?,?,?)",
+                        "INSERT INTO users(user_id,created_at,updated_at,premium_until) VALUES(?,?,?,?)",
                         (123, now, now, paid_until.isoformat()),
                     )
                     c.execute(
