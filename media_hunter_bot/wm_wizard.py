@@ -30,36 +30,19 @@ LOGO_SIZES = [(10, "Очень маленький — 10%"), (20, "Малень�
 LOGO_OPACITIES = OPACITIES
 POS_RU, COLOR_RU, FONT_RU, LOGO_SIZE_RU = dict(POSITIONS), dict(COLORS), dict(FONTS), dict(LOGO_SIZES)
 
-_MAIN_MENU_TEXT = {"upload": "📤 Загрузить видео", "premium": "⭐ Премиум", "restart": "🔄 Отменить мои задачи", "admin": "👑 Админка"}
-_MAIN_MENU_INFO = {
-    "download": "📥 <b>Скачать</b>\n\nПришлите ссылку на видео из YouTube, TikTok или Instagram. Бот скачает его, обработает и отправит вам готовый файл.",
-    "upload": "📤 <b>Загрузить видео</b>\n\nОтправьте боту уже имеющийся видеофайл с телефона или компьютера. Бот обработает его так же, как видео по ссылке.",
-    "channels": "📺 <b>Каналы</b>\n\nПодключайте свои Telegram-каналы для автоматической публикации обработанных видео. Для каждого канала можно отдельно включить автопост и настроить собственный водяной знак.",
-    "wm": "💧 <b>Водяной знак</b>\n\nЭто ваш личный водяной знак для видео, которое бот отправляет вам. Он настраивается отдельно от водяного знака подключённых каналов.",
-    "settings": "⚙️ <b>Настройки</b>\n\nВыберите, что получать после обработки: обычное видео или только аудио в формате MP3.",
-    "premium": "⭐ <b>Премиум</b>\n\nЗдесь можно купить Премиум на выбранный срок. Премиум-задачи получают приоритет в очереди.",
-    "restart": "🔄 <b>Отменить мои задачи</b>\n\nОтменяются только ваши текущие и ожидающие задачи. Задачи других пользователей не затрагиваются.",
-    "admin": "👑 <b>Админка</b>\n\nРаздел управления ботом: ОПП, отчёты, реклама, Stars и служебные настройки.",
-}
-
 class _MainMenuInfoMiddleware(BaseMiddleware):
+    """Keep menu navigation in-place; never create stale explanatory messages."""
     async def __call__(self, handler, event: CallbackQuery, data: dict):
-        info = _MAIN_MENU_INFO.get(event.data or "")
-        if info and event.message:
-            try:
-                await event.message.answer(info, parse_mode="HTML")
-            except Exception:
-                pass
         result = await handler(event, data)
         if event.message and event.data == "wm":
             try:
                 await event.message.edit_reply_markup(reply_markup=_kb([[_B("📝 Текст", "wmtext")], [_B("🖼 Логотип", "wmlogo")], [_B("◀️ Назад", "back")]]))
             except Exception:
                 pass
-        elif event.message and (event.data or "").startswith("cwm:"):
+        elif event.message and (event.data or "").startswith("cwmx:"):
             try:
                 cid = (event.data or "").split(":", 1)[1]
-                await event.message.edit_reply_markup(reply_markup=_kb([[_B("🔄 Автопост", f"toggle:{cid}"), _B("💧 Водяной знак", f"cwm:{cid}")], [_B("🗑 Удалить", f"del:{cid}")], [_B("◀️ Назад", "channels")]]))
+                await event.message.edit_reply_markup(reply_markup=_kb([[_B("🔄 Автопост", f"toggle:{cid}"), _B("💧 Водяной знак", f"cwmx:{cid}")], [_B("🗑 Удалить", f"del:{cid}")], [_B("◀️ Назад", "channels")]]))
             except Exception:
                 pass
         elif event.message and event.data == "upload":
@@ -72,7 +55,7 @@ class _MainMenuInfoMiddleware(BaseMiddleware):
                 cid = int((event.data or "").split(":", 1)[1])
                 row = next((x for x in await db.alist_channels(event.from_user.id) if x["channel_id"] == cid), None)
                 if row:
-                    await event.message.edit_reply_markup(reply_markup=_kb([[_B("🔄 Автопост", f"toggle:{cid}"), _B("💧 Водяной знак", f"cwm:{cid}")], [_B("🗑 Удалить", f"del:{cid}")], [_B("◀️ Назад", "channels")]]))
+                    await event.message.edit_reply_markup(reply_markup=_kb([[_B("🔄 Автопост", f"toggle:{cid}"), _B("💧 Водяной знак", f"cwmx:{cid}")], [_B("🗑 Удалить", f"del:{cid}")], [_B("◀️ Назад", "channels")]]))
             except Exception:
                 pass
         return result
@@ -92,7 +75,7 @@ def _chunk(items, n):
 def _friendly_menu(menu_fn, uid):
     original = menu_fn(uid)
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=_MAIN_MENU_TEXT.get(b.callback_data, b.text), callback_data=b.callback_data, url=b.url)
+        InlineKeyboardButton(text=b.text, callback_data=b.callback_data, url=b.url)
         for b in row] for row in original.inline_keyboard])
 
 def _summary(data):
