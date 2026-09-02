@@ -18,7 +18,6 @@ _processor.process_media = _optimized_process_media
 from . import wm_wizard as _wm_wizard
 
 _original_register_wm_wizard = _wm_wizard.register_wm_wizard
-_original_middleware_call = _wm_wizard._MainMenuInfoMiddleware.__call__
 
 
 def _filtered_menu(menu_fn, uid):
@@ -46,11 +45,7 @@ async def _patched_middleware_call(self, handler, event, data):
 _wm_wizard.register_wm_wizard = _patched_register_wm_wizard
 _wm_wizard._MainMenuInfoMiddleware.__call__ = _patched_middleware_call
 
-# Expose the optimized function through the package-level bootstrap only;
-# handlers will import the already-patched processor function.
 del _processor
 del _optimized_process_media
 del _safe_unique_video_filters
 del _wm_wizard
-del _original_register_wm_wizard
-del _original_middleware_call
