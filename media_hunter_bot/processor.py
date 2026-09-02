@@ -26,6 +26,28 @@ _FONT_PATHS = (
     "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
     "/System/Library/Fonts/Helvetica.ttc",
 )
+_FONT_STYLE_PATHS = {
+    "sans": (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ),
+    "bold": (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ),
+    "serif": (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ),
+    "mono": (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ),
+}
 
 # Hostnames rejected before DNS resolution (defense in depth).
 _BLOCKED_HOSTNAMES = frozenset({
@@ -46,10 +68,14 @@ _BLOCKED_HOSTNAME_SUFFIXES = (
 )
 
 
-def _find_font() -> str:
-    for p in _FONT_PATHS:
-        if os.path.exists(p):
-            return p
+def _find_font(style: str | None = None) -> str:
+    style_key = str(style or "sans")
+    for candidate in _FONT_STYLE_PATHS.get(style_key, _FONT_STYLE_PATHS["sans"]):
+        if os.path.exists(candidate):
+            return candidate
+    for candidate in _FONT_PATHS:
+        if os.path.exists(candidate):
+            return candidate
     try:
         proc = subprocess.run(["fc-match", "-f", "%{file}", "sans"], capture_output=True, text=True, timeout=5)
         if proc.returncode == 0 and proc.stdout.strip():
@@ -152,7 +178,6 @@ def validate_source_url(url: str) -> str:
         logger.warning("Rejected blocked hostname in source URL: %s", host_l)
         raise ValueError("Ссылки на локальные или внутренние адреса запрещены")
 
-    # Literal IP in hostname: reject non-global immediately without DNS.
     try:
         literal_ip = ipaddress.ip_address(host_l)
     except ValueError:
@@ -281,7 +306,7 @@ def _build_text_filter(wm: dict[str, Any], work_dir: Path) -> str | None:
     opacity = max(0.0, min(float(wm.get("opacity", 0.8)), 1.0))
     textfile = work_dir / "wm_text.txt"
     textfile.write_text(text, encoding="utf-8")
-    font = _find_font()
+    font = _find_font(str(wm.get("font", "sans")))
     font_opt = f":fontfile='{font}'" if font else ""
     return f"drawtext=textfile='{textfile}':{_positions_text(str(wm.get('position', 'br')))}:fontsize={size}:fontcolor={color}@{opacity:.2f}{font_opt}"
 
