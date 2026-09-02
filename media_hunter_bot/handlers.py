@@ -1,6 +1,23 @@
+"""Aiogram handlers + processing engine for Media Hunter Bot.
+
+Critical fixes applied:
+1. StateFilter(None) on url_message/upload so they do NOT intercept FSM input.
+2. Engine queue-size tracking is now atomic via asyncio.Lock.
+3. Temporary directories are cleaned up via try/finally in every handler.
+4. OPP private-invite links are handled gracefully.
+5. All blocking subprocess calls wrapped in asyncio.to_thread().
+6. restart() drains queued jobs and kills subprocesses.
+7. shutdown() kills FFmpeg/yt-dlp before stopping workers.
+8. ThrottlingMiddleware replies to Messages too.
+9. Telegram file_size=None is handled safely; downloaded size is always authoritative.
+10. Upload path checks queue limits before downloading the Telegram file.
+"""
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
+import secrets
 import shutil
 import signal
 import threading
@@ -9,26 +26,37 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
-from aiogram import Bot, Dispatcher, F, Router
-from aiogram.client.telegram import TelegramAPIServer
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.enums import ParseMode
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message, TelegramObject
-from aiogram.utils.chat_action import ChatActionSender
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.dispatcher.middlewares.base import BaseMiddleware
+from aiogram.types import (
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LabeledPrice,
+    Message,
+    PreCheckoutQuery,
+    TelegramObject,
+)
 
 from .config import (
     ADMIN_ID,
+    BOT_TOKEN,
     CLEANER_AGE_HOURS,
     LOCAL_BOT_API,
+    LOGO_DIR,
     MAX_CONCURRENT,
     MAX_PLAYLIST_ITEMS,
     MAX_QUEUE_SIZE,
+    MAX_USER_QUEUE,
+    MAX_URL_LOGICAL_MB,
+    SOFT_UNIQUE_SIZE_MB,
+    MAX_UNIQUE_SIZE_MB,
     MAX_SEND_MB,
     MAX_WATERMARK_MB,
     MAX_SOURCE_DOWNLOAD_MB,
@@ -57,6 +85,8 @@ from .wm_wizard import register_wm_wizard
 from .user_errors import user_facing_error
 router = Router()
 logger = logging.getLogger(__name__)
+
+
 
 
 class ThrottlingMiddleware(BaseMiddleware):
@@ -217,6 +247,7 @@ class Engine:
                         roots.discard(source.parent)
                         if not roots:
                             self.uploads.pop(uid, None)
+
                 self._queue_size = max(0, self._queue_size - 1)
                 count = self._user_queue_size.get(uid, 0) - 1
                 if count > 0:
@@ -369,7 +400,10 @@ class Engine:
                     if not jobs:
                         await self.bot.send_message(j.uid, "📚 Плейлист не содержит допустимых ссылок.")
                     elif len(jobs) < len(items):
-                        await self.bot.send_message(j.uid, f"📚 Плейлист: {len(jobs)} из {len(items)} видео добавлено в очередь.")
+                        await self.bot.send_message(
+                            j.uid,
+                            f"📚 Плейлист: {len(jobs)} из {len(items)} видео добавлено в очередь."
+                        )
                     else:
                         await self.bot.send_message(j.uid, f"📚 Плейлист: {len(jobs)} видео добавлено в очередь.")
                     return
@@ -393,85 +427,104 @@ class Engine:
                 raise RuntimeError(f"Исходный файл превышает абсолютный лимит {MAX_SOURCE_DOWNLOAD_MB} МБ")
             fmt = user["format"]
             audio_only = fmt == "mp3"
-            oversized = (not audio_only and size > MAX_SEND_MB * 1024 * 1024)
-            channels = await db.alist_channels(j.uid)
-            enabled_channels = [ch for ch in channels if ch["enabled"]]
-            caption = await metadata(source, media_title)
-
+            oversized = False
+            watermark = await db.aget_user_watermark(j.uid)
+            soft_unique_limit = SOFT_UNIQUE_SIZE_MB * 1024 * 1024
+            max_unique_limit = MAX_UNIQUE_SIZE_MB * 1024 * 1024
+            send_limit = MAX_SEND_MB * 1024 * 1024
+            if j.generation != self.gen.get(j.uid, 0):
+                await progress.cancel()
+                return
+            await progress.advance("process")
             if audio_only:
-                await progress.advance("process")
-                result = await asyncio.to_thread(process_media, source, work, await db.aget_user_watermark(j.uid), audio_only=True, compress=False, register=register)
-                if result.stat().st_size > MAX_SEND_MB * 1024 * 1024:
-                    raise RuntimeError(f"Результат превышает лимит отправки {MAX_SEND_MB} МБ")
-                if enabled_channels:
-                    await progress.advance("send")
-                    for ch in enabled_channels:
-                        try:
-                            await self.bot.send_audio(ch["channel_id"], FSInputFile(result, filename=safe_media_filename(media_title, result.suffix or ".mp3")))
-                        except Exception:
-                            logger.exception("Autopost failed uid=%s channel=%s", j.uid, ch.get("channel_id"))
-                else:
-                    await progress.advance("send")
-                    await self._send_private(j.uid, result, caption, filename=safe_media_filename(media_title, result.suffix or ".mp3"))
-            elif enabled_channels:
-                # Each enabled channel gets exactly one processing pass from the original source.
-                # This avoids first processing with the user's watermark and then processing
-                # the original again for the channel, which used to waste a full unique pass.
-                await progress.advance("process")
-                for ch in enabled_channels:
-                    channel_wm = await db.aget_channel_watermark(ch["channel_id"], j.uid)
-                    cr = await asyncio.to_thread(
-                        process_media,
-                        source,
-                        work,
-                        channel_wm,
-                        audio_only=False,
-                        compress=oversized,
-                        register=register,
-                    )
-                    if cr.stat().st_size > MAX_SEND_MB * 1024 * 1024:
-                        cr = await asyncio.to_thread(
-                            process_media,
-                            source,
-                            work,
-                            channel_wm,
-                            audio_only=False,
-                            compress=True,
-                            register=register,
-                        )
-                    if cr.stat().st_size > MAX_SEND_MB * 1024 * 1024:
-                        raise RuntimeError(f"После сжатия файл для канала всё ещё превышает лимит отправки {MAX_SEND_MB} МБ")
-                    await progress.advance("send")
-                    try:
-                        await self.bot.send_video(
-                            ch["channel_id"],
-                            FSInputFile(cr, filename=safe_media_filename(media_title, cr.suffix or ".mp4")),
-                            caption=caption or None,
-                            supports_streaming=True,
-                        )
-                    except Exception:
-                        logger.exception("Autopost failed uid=%s channel=%s", j.uid, ch.get("channel_id"))
-                        try:
-                            await self.bot.send_message(j.uid, f'⚠️ Автопост в «{ch["title"]}» не выполнен: {user_facing_error(Exception("Ошибка отправки"))}')
-                        except Exception:
-                            pass
-            else:
-                # No enabled channels: process the user's video exactly once.
-                await progress.advance("process")
                 result = await asyncio.to_thread(
                     process_media,
                     source,
                     work,
-                    await db.aget_user_watermark(j.uid),
-                    audio_only=False,
-                    compress=oversized,
+                    watermark,
+                    audio_only=True,
+                    compress=False,
                     register=register,
                 )
-                if result.stat().st_size > MAX_SEND_MB * 1024 * 1024:
-                    raise RuntimeError(f"Результат превышает лимит отправки {MAX_SEND_MB} МБ")
-                await progress.advance("send")
-                await self._send_private(j.uid, result, caption, filename=safe_media_filename(media_title, result.suffix or ".mp4"))
-            await progress.done()
+            elif size > max_unique_limit:
+                # >100 МБ и <= абсолютного лимита: только оригинал.
+                result = source
+                oversized = True
+            elif size > soft_unique_limit:
+                # >80 МБ и <=100 МБ: уникализация + обязательное сжатие до 80 МБ.
+                result = await asyncio.to_thread(
+                    process_media,
+                    source,
+                    work,
+                    watermark,
+                    audio_only=False,
+                    compress=True,
+                    register=register,
+                )
+                result_size = (await asyncio.to_thread(result.stat)).st_size
+                if result_size > soft_unique_limit:
+                    raise RuntimeError(
+                        f"После сжатия файл всё ещё превышает целевой лимит {SOFT_UNIQUE_SIZE_MB} МБ"
+                    )
+            else:
+                # <=80 МБ: только уникализация, без сжатия.
+                result = await asyncio.to_thread(
+                    process_media,
+                    source,
+                    work,
+                    watermark,
+                    audio_only=False,
+                    compress=False,
+                    register=register,
+                )
+
+            meta = await asyncio.to_thread(metadata, source)
+            caption = str(meta.get("description") or media_title or meta.get("title") or "")[:900]
+            if oversized:
+                caption += (
+                    f"\n\nℹ️ Файл больше {MAX_UNIQUE_SIZE_MB} МБ, "
+                    "поэтому отправлен оригинал без уникализации."
+                )
+
+            result_size = (await asyncio.to_thread(result.stat)).st_size
+            if result_size > send_limit:
+                raise RuntimeError(
+                    f"Результат превышает лимит отправки {MAX_SEND_MB} МБ"
+                )
+            if j.generation != self.gen.get(j.uid, 0):
+                await progress.cancel()
+                return
+            await progress.advance("send")
+            await self._send_private(j.uid, result, caption, filename=safe_media_filename(media_title, result.suffix or ".mp4"))
+            await progress.complete()
+            for ch in await db.alist_channels(j.uid):
+                if not ch["enabled"]:
+                    continue
+                try:
+                    if audio_only or oversized:
+                        cr = result if audio_only else source
+                    else:
+                        channel_wm = await db.aget_channel_watermark(ch["channel_id"], j.uid)
+                        cr = await asyncio.to_thread(process_media, source, work, channel_wm, audio_only=False, compress=False, register=register)
+                        cr_size = (await asyncio.to_thread(cr.stat)).st_size
+                        if cr_size > MAX_SEND_MB * 1024 * 1024:
+                            cr = await asyncio.to_thread(process_media, source, work, channel_wm, audio_only=False, compress=True, register=register)
+                            if (await asyncio.to_thread(cr.stat)).st_size > MAX_SEND_MB * 1024 * 1024:
+                                raise RuntimeError(f"После сжатия файл для канала всё ещё превышает лимит отправки {MAX_SEND_MB} МБ")
+                    if cr.suffix.lower() == ".mp3":
+                        await self.bot.send_audio(ch["channel_id"], FSInputFile(cr, filename=safe_media_filename(media_title, cr.suffix or ".mp3")))
+                    else:
+                        await self.bot.send_video(ch["channel_id"], FSInputFile(cr, filename=safe_media_filename(media_title, cr.suffix or ".mp4")), caption=caption or None, supports_streaming=True)
+                except Exception as e:
+                    logger.exception("Autopost failed uid=%s channel=%s", j.uid, ch.get("channel_id"))
+                    safe = user_facing_error(e)
+                    try:
+                        await self.bot.send_message(
+                            j.uid,
+                            f'⚠️ Автопост в «{ch["title"]}» не выполнен: {safe}',
+                        )
+                    except Exception:
+                        pass
         except asyncio.CancelledError:
             try:
                 await progress.cancel()
@@ -513,7 +566,6 @@ class Engine:
         if ad:
             rows = [[B(button, url=url)]] if button and url else []
             await self.bot.send_message(uid, ad, reply_markup=kb(rows) if rows else None)
-
     async def _cleaner(self):
         while True:
             try:
@@ -540,40 +592,191 @@ class Engine:
                 try:
                     if p.returncode is None:
                         p.terminate()
+                        try:
+                            await asyncio.wait_for(asyncio.to_thread(p.wait), timeout=3)
+                        except asyncio.TimeoutError:
+                            p.kill()
+                            await asyncio.to_thread(p.wait)
                 except Exception:
                     pass
-        for t in self.workers:
-            t.cancel()
+        with self._proc_lock:
+            self.processes.clear()
         if self.cleaner_task:
             self.cleaner_task.cancel()
-        await asyncio.gather(*self.workers, return_exceptions=True)
+        for t in list(self.workers):
+            t.cancel()
+        tasks = [*self.workers]
         if self.cleaner_task:
-            await asyncio.gather(self.cleaner_task, return_exceptions=True)
+            tasks.append(self.cleaner_task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.workers.clear()
+        self.cleaner_task = None
 
 
-@router.message(Command("start"))
-async def start(m: Message, state: FSMContext):
+@router.message(CommandStart())
+async def start(m: Message, bot: Bot, state: FSMContext):
     await state.clear()
-    await db.aensure_user(m.from_user.id)
-    await m.answer("🎬 Media Hunter", reply_markup=menu(m.from_user.id))
+    await db.aensure_user(m.from_user.id, m.from_user.username, m.from_user.first_name)
+    if m.text:
+        parts = m.text.split(maxsplit=1)
+        if len(parts) == 2 and parts[1].startswith("ref_"):
+            try:
+                referrer_id = int(parts[1][4:])
+                await db.aapply_referral(m.from_user.id, referrer_id)
+            except ValueError:
+                pass
+    missing, rows = await opp_check(bot, m.from_user.id, m.from_user.username)
+    if missing:
+        await m.answer("🔐 Для использования бота выполните обязательные подписки:", reply_markup=kb(rows + [[B("◀️ Назад", "back")]]))
+        return
+    await m.answer("👋 Media Hunter готов.", reply_markup=menu(m.from_user.id))
 
 
-@router.message(Command("premium"))
-async def premium(m: Message):
-    await m.answer("⭐ Premium", reply_markup=premium_menu())
-
-
-@router.message(F.text == "📥 Скачать")
-async def download_menu(m: Message, state: FSMContext):
+@router.callback_query(F.data == "menu_ref")
+async def menu_ref(c: CallbackQuery, bot: Bot, state: FSMContext):
     await state.clear()
-    await state.set_state(S.wm)
-    await m.answer("🔗 Пришлите ссылку на видео или плейлист.")
+    me = await bot.get_me()
+    username = me.username
+    if not username:
+        await c.answer("Не удалось получить ссылку реферала.", show_alert=True)
+        return
+    count = await db.aget_referrals(c.from_user.id)
+    link = f"https://t.me/{username}?start=ref_{c.from_user.id}"
+    await c.answer()
+    await c.message.edit_text(f"🎁 Ваша реферальная ссылка:\n{link}\n\nПриглашено пользователей: {count}", reply_markup=kb([[B("◀️ Назад", "back")]]))
 
 
-@router.message(S.wm, F.text)
-async def geturl(m: Message, state: FSMContext, engine: Engine):
+@router.callback_query(F.data == "check_opp")
+async def check_opp(c: CallbackQuery, bot: Bot, state: FSMContext):
+    await state.clear()
+    missing, rows = await opp_check(bot, c.from_user.id, c.from_user.username)
+    await c.answer()
+    await c.message.edit_text("❌ Не все обязательные подписки выполнены." if missing else "✅ ОПП выполнены.", reply_markup=kb(rows) if missing else menu(c.from_user.id))
+
+
+@router.callback_query(F.data == "back")
+async def back(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await c.answer()
+    await c.message.edit_text("Главное меню:", reply_markup=menu(c.from_user.id))
+
+
+@router.callback_query(F.data == "settings")
+async def settings(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    u = await db.aget_user(c.from_user.id)
+    f = u["format"] if u else "video"
+    await c.answer()
+    await c.message.edit_text(f'⚙️ Формат: {"🎵 Только MP3" if f == "mp3" else "🎬 Видео"}', reply_markup=kb([[B("🎬 Видео", "fmt:video"), B("🎵 Только MP3", "fmt:mp3")], [B("◀️ Назад", "back")]]))
+
+
+@router.callback_query(F.data.startswith("fmt:"))
+async def fmt(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    v = c.data.split(":", 1)[1]
+    if v not in {"video", "mp3"}:
+        await c.answer("Ошибка", show_alert=True)
+        return
+    await db.aset_format(c.from_user.id, v)
+    await c.answer("Сохранено")
+    await settings(c, state)
+
+
+@router.callback_query(F.data == "premium")
+async def premium(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await c.answer()
+    await c.message.edit_text("⭐ Выберите срок Premium:", reply_markup=premium_menu())
+
+
+@router.callback_query(F.data == "stars")
+async def stars(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    url = await db.aget_setting("stars_link", "")
+    if not url:
+        await c.answer("Партнёрская ссылка Stars пока не настроена.", show_alert=True)
+        return
+    await c.answer()
+    await c.message.edit_text("💎 Если не хватает Stars, купите их у партнёра:", reply_markup=kb([[B("💎 Купить Stars", url=url)], [B("◀️ Назад", "premium")]]))
+
+
+@router.callback_query(F.data.startswith("buy:"))
+async def buy(c: CallbackQuery, bot: Bot, state: FSMContext):
+    await state.clear()
     try:
-        await state.clear()
+        days = int(c.data.split(":", 1)[1])
+        price = PREMIUM_PLANS[days]
+    except (ValueError, KeyError):
+        await c.answer("Некорректный тариф", show_alert=True)
+        return
+    user = await db.aget_user(c.from_user.id)
+    if user and user["permanent_premium"]:
+        await c.answer("У вас уже постоянный Premium.", show_alert=True)
+        return
+    payload = f"premium:{days}:{c.from_user.id}:{secrets.token_hex(8)}"
+    await c.answer()
+    await bot.send_invoice(c.from_user.id, f"Premium на {days // 30} мес.", f"Media Hunter Premium — {days} дней", payload, "XTR", [LabeledPrice(label="Premium", amount=price)])
+
+
+@router.pre_checkout_query()
+async def checkout(q: PreCheckoutQuery, bot: Bot):
+    parts = q.invoice_payload.split(":")
+    ok = False
+    if len(parts) == 4 and parts[0] == "premium":
+        try:
+            days = int(parts[1])
+            uid = int(parts[2])
+            ok = uid == q.from_user.id and days in PREMIUM_PLANS and q.currency == "XTR" and q.total_amount == PREMIUM_PLANS[days]
+        except ValueError:
+            pass
+    await bot.answer_pre_checkout_query(q.id, ok=ok, error_message=None if ok else "Платёж не прошёл проверку. Откройте тариф заново.")
+
+
+@router.message(F.successful_payment)
+async def paid(m: Message):
+    p = m.successful_payment
+    parts = p.invoice_payload.split(":")
+    if len(parts) != 4 or parts[0] != "premium":
+        return
+    try:
+        days = int(parts[1])
+        uid = int(parts[2])
+    except ValueError:
+        return
+    if uid != m.from_user.id or days not in PREMIUM_PLANS or p.currency != "XTR" or p.total_amount != PREMIUM_PLANS[days]:
+        return
+    if await db.asave_payment(
+        m.from_user.id,
+        p.invoice_payload,
+        days,
+        p.total_amount,
+        p.telegram_payment_charge_id,
+    ):
+        await m.answer(
+            f"🎉 Premium активирован на {days} дней!",
+            reply_markup=menu(m.from_user.id),
+        )
+
+
+@router.callback_query(F.data == "download")
+async def download_menu(c: CallbackQuery, bot: Bot, state: FSMContext):
+    await state.clear()
+    missing, _ = await opp_check(bot, c.from_user.id, c.from_user.username)
+    if missing:
+        await c.answer("Сначала выполните ОПП", show_alert=True)
+        return
+    await c.answer()
+    await c.message.edit_text("📥 Пришлите ссылку YouTube/TikTok/Instagram. Формат берётся из настроек.", reply_markup=kb([[B("⚙️ Формат", "settings")], [B("◀️ Назад", "back")]]))
+
+
+@router.message(StateFilter(None), F.text.regexp(r"^https?://"))
+async def url_message(m: Message, bot: Bot, engine: Engine):
+    missing, rows = await opp_check(bot, m.from_user.id, m.from_user.username)
+    if missing:
+        await m.answer("🔐 Сначала выполните обязательные подписки.", reply_markup=kb(rows))
+        return
+    try:
         await engine.add(m.from_user.id, url=m.text.strip())
         await m.answer("⏳ Ссылка добавлена в очередь.")
     except (RuntimeError, ValueError) as e:
@@ -596,6 +799,7 @@ async def upload(m: Message, bot: Bot, engine: Engine):
     if missing:
         await m.answer("🔐 Сначала выполните обязательные подписки.", reply_markup=kb(rows))
         return
+    # Reject before downloading a potentially large Telegram file.
     try:
         await engine.ensure_can_enqueue(m.from_user.id)
     except RuntimeError as e:
@@ -818,6 +1022,7 @@ async def aopp(c: CallbackQuery):
     await c.answer()
     await c.message.edit_text("Три независимых ОПП:", reply_markup=kb(rows))
 
+
 @router.callback_query(F.data.startswith("opp:"))
 async def opp(c: CallbackQuery, state: FSMContext):
     if c.from_user.id != ADMIN_ID:
@@ -834,84 +1039,93 @@ async def opp(c: CallbackQuery, state: FSMContext):
     await state.update_data(slot=slot)
     await state.set_state(S.admin_opp)
     await c.answer()
-    await c.message.edit_text("Отправьте:\n• Публичный: ВКЛ|Название|https://t.me/username\n• Закрытый: ВКЛ|Название|-100ID|https://t.me/+invite\n", reply_markup=kb([[B("◀️ Назад", "admin")]]))
+    await c.message.edit_text(
+        "Отправьте:\n"
+        "• Публичный: ВКЛ|Название|https://t.me/username\n"
+        "• Закрытый: ВКЛ|Название|-100ID|https://t.me/+invite\n"
+        "• Выключить: ВЫКЛ\n\n"
+        "Для закрытого канала бот должен быть админом (достаточно пустых прав)."
+    )
 
 
 @router.message(S.admin_opp)
-async def oppvalue(m: Message, state: FSMContext, bot: Bot):
-    try:
-        slot = int((await state.get_data()).get("slot", 0))
-        parts = (m.text or "").split("|", 3)
-        if len(parts) not in (3, 4):
-            raise ValueError("Неверный формат. Используйте ВКЛ|Название|URL или ВКЛ|Название|-100ID|URL")
-        enabled = parts[0].strip().upper() == "ВКЛ"
-        if not enabled and parts[0].strip().upper() != "ВЫКЛ":
-            raise ValueError("Первое поле должно быть ВКЛ или ВЫКЛ")
-        title = parts[1].strip()[:200]
-        if len(parts) == 3:
-            cid = None
-            url = parts[2].strip()
-        else:
-            cid = int(parts[2].strip())
-            url = parts[3].strip()
-        parsed = urlparse(url)
-        if parsed.scheme != "https" or parsed.hostname not in ("t.me", "telegram.me") or parsed.username or parsed.password or parsed.port is not None or "\r" in url or "\n" in url:
-            raise ValueError("Нужна ссылка https://t.me/... без учётных данных")
-        if cid is not None:
-            chat = await bot.get_chat(cid)
-            me = await bot.get_chat_member(chat.id, bot.id)
-            if me.status not in ("administrator", "creator"):
-                raise ValueError("Бот должен быть администратором канала")
-        await db.aset_opp(slot, enabled, title, cid, url)
-        await state.clear()
-        await m.answer("✅ ОПП сохранено", reply_markup=menu(m.from_user.id))
-    except (TelegramBadRequest, TelegramForbiddenError):
-        await m.answer("❌ Не удалось проверить канал")
-    except (ValueError, TypeError) as e:
-        await m.answer(f"❌ {user_facing_error(e)}")
-    except Exception:
-        logger.exception("Failed to save OPP for uid=%s", m.from_user.id)
-        await m.answer("❌ Не удалось сохранить ОПП")
-
-@router.callback_query(F.data == "aopp_reports")
-async def aopp_reports(c: CallbackQuery):
-    if c.from_user.id != ADMIN_ID:
-        await c.answer("Нет доступа", show_alert=True)
-        return
-    rows = await db.aget_opp_reports()
-    if not rows:
-        text = "📊 Отчётов пока нет."
-    else:
-        lines = ["📊 Последние отчёты ОПП:"]
-        for r in rows:
-            lines.append(f"• {r['slot']}: {r['title']} — {r['joined_at']}")
-        text = "\n".join(lines)
-    await c.answer()
-    await c.message.edit_text(text, reply_markup=kb([[B("◀️ Назад", "admin")]]))
-
-@router.callback_query(F.data == "aopp_retain")
-async def aopp_retain(c: CallbackQuery, state: FSMContext):
-    if c.from_user.id != ADMIN_ID:
-        await c.answer("Нет доступа", show_alert=True)
-        return
-    await state.set_state(S.admin_opp)
-    await c.answer()
-    await c.message.edit_text("Укажите срок хранения отчётов в днях (например 30).", reply_markup=kb([[B("◀️ Назад", "admin")]]))
-
-@router.message(S.admin_opp)
-async def aopp_retain_value(m: Message, state: FSMContext):
+async def oppvalue(m: Message, state: FSMContext):
     if m.from_user.id != ADMIN_ID:
         await state.clear()
         return
-    try:
-        days = int((m.text or "").strip())
-        if not 1 <= days <= 3650:
-            raise ValueError("Срок должен быть от 1 до 3650 дней")
-        await db.aset_setting("opp_report_retention_days", str(days))
+    slot = (await state.get_data()).get("slot")
+    if slot not in {1, 2, 3}:
         await state.clear()
-        await m.answer("✅ Срок хранения изменён", reply_markup=menu(m.from_user.id))
-    except ValueError as e:
-        await m.answer(f"❌ {user_facing_error(e)}")
+        await m.answer("❌ Некорректный слот.")
+        return
+    text = (m.text or "").strip()
+    if text.upper() == "ВЫКЛ":
+        await db.aset_opp(slot, False, "", "", "")
+        await state.clear()
+        await m.answer(
+            "✅ ОПП выключено. Кампания закрыта, данные удалятся после срока хранения.",
+            reply_markup=menu(m.from_user.id),
+        )
+        return
+
+    parts = [x.strip() for x in text.split("|")]
+    if len(parts) not in (3, 4):
+        await m.answer(
+            "Формат:\n"
+            "ВКЛ|Название|https://t.me/username\n"
+            "или для закрытого:\n"
+            "ВКЛ|Название|-1001234567890|https://t.me/+invite"
+        )
+        return
+    if parts[0].upper() != "ВКЛ":
+        await m.answer("Первое поле: ВКЛ или отправьте ВЫКЛ")
+        return
+    title = parts[1][:100]
+    chat_ref = ""
+    opp_url = ""
+    if len(parts) == 3:
+        opp_url = parts[2]
+        parsed = urlparse(opp_url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in ("t.me", "telegram.me")
+            or parsed.username
+            or parsed.password
+            or parsed.port is not None
+            or not parsed.path.strip("/")
+            or parsed.path.strip("/").startswith(("+", "joinchat/"))
+        ):
+            await m.answer(
+                "❌ Для публичного канала нужна ссылка https://t.me/username.\n"
+                "Для закрытого: ВКЛ|Название|-100ID|https://t.me/+invite"
+            )
+            return
+        path = parsed.path.strip("/").split("/")[0]
+        chat_ref = path if path.startswith("@") else path
+    else:
+        chat_ref = parts[2]
+        opp_url = parts[3]
+        if not chat_ref:
+            await m.answer("❌ chat_ref: числовой ID канала (-100…) или @username")
+            return
+        parsed = urlparse(opp_url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in ("t.me", "telegram.me")
+            or parsed.username
+            or parsed.password
+            or parsed.port is not None
+            or not parsed.path.strip("/")
+        ):
+            await m.answer("❌ Нужна invite-ссылка https://t.me/+… или https://t.me/joinchat/…")
+            return
+    await db.aset_opp(slot, True, title, opp_url, chat_ref)
+    await state.clear()
+    await m.answer(
+        f"✅ ОПП {slot} включено.\nПроверка: {chat_ref}\nКнопка: {opp_url}",
+        reply_markup=menu(m.from_user.id),
+    )
+
 
 @router.callback_query(F.data == "aad")
 async def aad(c: CallbackQuery, state: FSMContext):
@@ -921,6 +1135,7 @@ async def aad(c: CallbackQuery, state: FSMContext):
     await state.set_state(S.admin_ad)
     await c.answer()
     await c.message.edit_text("Отправьте: ТЕКСТ|НАЗВАНИЕ КНОПКИ|URL\nили ВЫКЛ. Реклама публикуется только после видео в личном чате.")
+
 
 @router.message(S.admin_ad)
 async def advalue(m: Message, state: FSMContext):
@@ -947,6 +1162,7 @@ async def advalue(m: Message, state: FSMContext):
     await state.clear()
     await m.answer("✅ Реклама сохранена.", reply_markup=menu(m.from_user.id))
 
+
 @router.callback_query(F.data == "astars")
 async def astars(c: CallbackQuery, state: FSMContext):
     if c.from_user.id != ADMIN_ID:
@@ -955,6 +1171,7 @@ async def astars(c: CallbackQuery, state: FSMContext):
     await state.set_state(S.admin_stars)
     await c.answer()
     await c.message.edit_text("Пришлите новую партнёрскую ссылку Stars.")
+
 
 @router.message(S.admin_stars)
 async def astarsvalue(m: Message, state: FSMContext):
@@ -970,6 +1187,7 @@ async def astarsvalue(m: Message, state: FSMContext):
     await state.clear()
     await m.answer("✅ Ссылка Stars изменена.", reply_markup=menu(m.from_user.id))
 
+
 @router.callback_query(F.data == "aytdlp")
 async def aytdlp(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
@@ -977,6 +1195,7 @@ async def aytdlp(c: CallbackQuery):
         return
     await c.answer()
     await c.message.edit_text("🔄 yt-dlp закреплён на версии из requirements.txt. Для ручного обновления обновите пакет на сервере и перезапустите бота.", reply_markup=kb([[B("◀️ Назад", "admin")]]))
+
 
 @router.callback_query(F.data == "abot")
 async def abot(c: CallbackQuery):
@@ -986,6 +1205,7 @@ async def abot(c: CallbackQuery):
     await c.answer()
     await c.message.edit_text("Перезапустить бота?", reply_markup=kb([[B("✅ Подтвердить", "abot:yes"), B("❌ Отмена", "admin")]]))
 
+
 @router.callback_query(F.data == "abot:yes")
 async def abot_yes(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
@@ -994,11 +1214,13 @@ async def abot_yes(c: CallbackQuery):
     await c.answer("Бот перезапускается")
     asyncio.create_task(_exit_later())
 
+
 async def _exit_later():
     await asyncio.sleep(1)
     if os.name == "nt":
         os._exit(0)
     os.kill(os.getpid(), signal.SIGTERM)
+
 
 @router.message(Command("paysupport"))
 async def paysupport(m: Message, state: FSMContext):
