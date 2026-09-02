@@ -219,10 +219,63 @@ def playlist_items(url: str, max_items: int) -> list[str]:
     return lines
 
 
-def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> Path:
+def safe_media_filename(title: str, ext: str = ".mp4") -> str:
+    """Build a Telegram-safe download filename from a media title."""
+    name = str(title or "").strip() or "video"
+    forbidden = set('\\/:*?"<>|')
+    cleaned = []
+    for ch in name:
+        o = ord(ch)
+        if ch in forbidden or ch in "\n\r\t":
+            cleaned.append(" ")
+        elif o < 32:
+            continue
+        else:
+            cleaned.append(ch)
+    name = "".join(cleaned)
+    name = " ".join(name.split())
+    name = name.strip(" .") or "video"
+    if len(name) > 80:
+        name = name[:80].rstrip(" .")
+    if not ext.startswith("."):
+        ext = f".{ext}"
+    return f"{name}{ext}"
+
+
+def _title_from_info_json(work_dir: Path) -> str:
+    for info in work_dir.glob("*.info.json"):
+        try:
+            data = json.loads(info.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            continue
+        title = str(data.get("title") or data.get("fulltitle") or "").strip()
+        if title:
+            return title[:200]
+    return ""
+
+
+def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> tuple[Path, str]:
+    """Download media and return (file_path, title).
+
+    Title comes from yt-dlp info.json when available; otherwise a fallback name.
+    """
     url = validate_source_url(url)
     out_template = str(work_dir / "source.%(ext)s")
-    cmd = ["yt-dlp", "--no-playlist", "--no-warnings", "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]/best", "--merge-output-format", "mp4", "--max-filesize", f"{MAX_SOURCE_DOWNLOAD_MB}M", "-o", out_template, "--no-progress"]
+    cmd = [
+        "yt-dlp",
+        "--no-playlist",
+        "--no-warnings",
+        "-f",
+        "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]/best",
+        "--merge-output-format",
+        "mp4",
+        "--max-filesize",
+        f"{MAX_SOURCE_DOWNLOAD_MB}M",
+        "-o",
+        out_template,
+        "--write-info-json",
+        "--no-progress",
+    ]
     if COOKIES_PATH.exists():
         cmd.extend(["--cookies", str(COOKIES_PATH)])
     cmd.append(url)
@@ -241,7 +294,10 @@ def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> Path:
             err_text = stderr.decode("utf-8", "replace")[:2000]
             logger.warning("yt-dlp failed (code=%s): %s", proc.returncode, err_text)
             raise RuntimeError("Не удалось скачать медиа. Проверьте ссылку или попробуйте позже.")
-    candidates = list(work_dir.glob("source.*"))
+    candidates = [c for c in work_dir.glob("source.*") if c.suffix.lower() != ".json" and not c.name.endswith(".info.json")]
+    candidates = [c for c in candidates if c.is_file() and c.suffix.lower() in {".mp4", ".webm", ".mkv", ".m4a", ".mp3", ".mov"}]
+    if not candidates:
+        candidates = [c for c in work_dir.iterdir() if c.is_file() and c.suffix.lower() in {".mp4", ".webm", ".mkv", ".m4a", ".mp3", ".mov"}]
     if not candidates:
         logger.warning("yt-dlp finished but no file found in %s", work_dir)
         raise RuntimeError("Не удалось скачать медиа. Файл не получен.")
@@ -250,7 +306,10 @@ def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> Path:
     if result.stat().st_size > MAX_SOURCE_DOWNLOAD_MB * 1024 * 1024:
         result.unlink(missing_ok=True)
         raise RuntimeError(f"Исходный файл превышает абсолютный лимит {MAX_SOURCE_DOWNLOAD_MB} МБ")
-    return result
+    title = _title_from_info_json(work_dir)
+    if not title:
+        title = "video"
+    return result, title
 
 
 def ffprobe(path: Path) -> tuple[dict[str, Any], int]:
@@ -388,7 +447,7 @@ def process_media(source: Path, work_dir: Path, watermark: dict[str, Any], audio
             proc.kill()
             proc.communicate()
             logger.warning("ffmpeg timed out (10 min) for work_dir=%s", work_dir)
-            raise RuntimeError("Превышено время ожидания при обработке медиа. Попробуйте позже.")
+            raise RuntimeError("Не удалось обработать медиа. Файл повреждён или формат не поддерживается.")
         finally:
             register(None)
         if proc.returncode != 0:
