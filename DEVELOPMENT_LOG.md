@@ -104,6 +104,18 @@
 - ⬜ Production smoke test PNG logo.
 - ⬜ Production smoke test video + logo.
 
+## Регрессия process_media wrapper — 2026-09-02
+- Production smoke test после деплоя показал `TypeError: <lambda>() takes 3 positional arguments but 6 were given` в `wm_wizard.py:148`.
+- Причина: bootstrap cache wrapper в `__init__.py` объявлял `audio_only`, `compress`, `register` только keyword-only, а watermark wrapper вызывает `process_media` позиционно шестью аргументами.
+- Логотип при этом уже загружается успешно; падение происходит на этапе запуска обработки.
+- ✅ Заменён lambda на `_cached_process_entry(...)`, принимающий legacy positional вызов и передающий параметры в cache именованно.
+- ✅ Добавлен regression test, проверяющий, что эти три аргумента не являются keyword-only.
+- Commit: `eac7b433970f4136ecbd53b5edf591b1b9dfb989`.
+- Commit test: `c190963d167c633acd9c11956664ae1a7898bf9d`.
+- ⬜ Production повторно проверить `Моё видео` и YouTube.
+- ⬜ Production проверить video+logo.
+- ⬜ Production проверить autopost и отсутствие второго encode при совпадающем профиле.
+
 ## Tests / CI
 - `.github/workflows/tests.yml`: install dependencies → compile → `unittest discover`.
 - Run `33648480341` — ✅ success.
@@ -111,21 +123,24 @@
 - Run `33653931005` — ✅ success.
 - Run `33655342998` на `046fbb3e...` — ✅ success.
 - Run `33655394965` на `bc8f2e37...` — Local Bot API regression.
-- ⬜ CI для commits `a26db9ec...`, `2c8dd1ca...`, `dacd9e38...` после добавления processing cache ещё не подтверждён.
+- Run `33655799262` на `1fab8a9a...` — ✅ success.
+- ⬜ CI для новых commits `eac7b433...` и `c190963d...`.
 
 ## Последние commits
+- `c190963d167c633acd9c11956664ae1a7898bf9d` — Add regression test for process wrapper arguments.
+- `eac7b433970f4136ecbd53b5edf591b1b9dfb989` — Fix process_media wrapper positional arguments.
 - `a26db9ec361e2fa9bd58be3ccd069e9894fd7838` — Avoid duplicate media processing for identical watermark profiles.
 - `2c8dd1ca4a20ead1f32a826fe0e50edc1b4f69c5` — Reuse identical processing results during autopost.
 - `dacd9e387a65377e1e8bf2933155d4f2613fb8ab` — Test reuse of identical processing results.
 - `046fbb3efc38873deb07df28ca07249b96a66ac3` — Fix Local Bot API file downloads.
-- `704be780aed7d80eb1cd58b05fb715375086bfcf` — Document FFmpeg optimization and UI fixes.
 
 ## Handoff
-1. ⬜ Дождаться green CI для текущего head.
+1. ⬜ CI для текущего head (`c190963d...`).
 2. ⬜ Deploy branch head to VPS и restart `media-hunter.service`.
 3. ⬜ Проверить `Моё видео`.
-4. ⬜ Проверить PNG logo и video+logo.
-5. ⬜ Проверить enabled autopost.
-6. ⬜ Проверить, что одинаковый watermark не запускает второй FFmpeg.
-7. ⬜ Улучшить stderr logging FFmpeg.
-8. 🔐 Перевыпустить Bot Token через BotFather из-за раскрытия в логах.
+4. ⬜ Проверить YouTube.
+5. ⬜ Проверить PNG logo и video+logo.
+6. ⬜ Проверить enabled autopost.
+7. ⬜ Проверить, что одинаковый watermark не запускает второй FFmpeg.
+8. ⬜ Улучшить stderr logging FFmpeg.
+9. 🔐 Перевыпустить Bot Token через BotFather из-за раскрытия в логах.
