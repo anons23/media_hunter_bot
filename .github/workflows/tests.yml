@@ -2,9 +2,9 @@ name: Media Hunter tests
 
 on:
   push:
-    branches: [Media_hanter-v3-security, Media_hanter-v3]
+    branches: [Media_hanter-v3-security]
   pull_request:
-    branches: [Media_hanter-v3-security, Media_hanter-v3]
+    branches: [Media_hanter-v3-security]
   workflow_dispatch:
 
 permissions:
