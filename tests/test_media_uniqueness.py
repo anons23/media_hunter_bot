@@ -1,5 +1,7 @@
 import inspect
+import tempfile
 import unittest
+from pathlib import Path
 
 from media_hunter_bot import processor
 from media_hunter_bot.unique_filter import unique_video_filters
@@ -30,9 +32,34 @@ class MediaUniquenessRegressionTests(unittest.TestCase):
         self.assertIn('"-crf", "27"', source)
 
     def test_local_bot_api_is_configured_for_absolute_file_paths(self):
-        from media_hunter_bot import __file__ as package_file
         source = inspect.getsource(__import__("media_hunter_bot"))
         self.assertIn('kwargs.setdefault("is_local", True)', source)
+
+    def test_identical_processing_profile_is_reused(self):
+        from media_hunter_bot.process_cache import cached_process_media, clear
+
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.mp4"
+            work = root / "work"
+            source.write_bytes(b"source")
+            work.mkdir()
+
+            def fake_processor(source_path, work_path, watermark, *, audio_only, compress, register):
+                calls.append((source_path, work_path, watermark, audio_only, compress, register))
+                result = work_path / f"out-{len(calls)}.mp4"
+                result.write_bytes(b"result")
+                return result
+
+            clear()
+            first = cached_process_media(fake_processor, source, work, {"type": "text", "text": "A"}, audio_only=False, compress=False, register=None)
+            second = cached_process_media(fake_processor, source, work, {"type": "text", "text": "A"}, audio_only=False, compress=False, register=None)
+            third = cached_process_media(fake_processor, source, work, {"type": "text", "text": "B"}, audio_only=False, compress=False, register=None)
+            self.assertEqual(first, second)
+            self.assertNotEqual(first, third)
+            self.assertEqual(len(calls), 2)
+            clear()
 
 
 if __name__ == "__main__":
