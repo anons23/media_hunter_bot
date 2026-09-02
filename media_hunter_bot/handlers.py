@@ -514,7 +514,7 @@ class Engine:
                     if cr.suffix.lower() == ".mp3":
                         await self.bot.send_audio(ch["channel_id"], FSInputFile(cr, filename=safe_media_filename(media_title, cr.suffix or ".mp3")))
                     else:
-                        await self.bot.send_video(ch["channel_id"], FSInputFile(cr), caption=caption or None, supports_streaming=True)
+                        await self.bot.send_video(ch["channel_id"], FSInputFile(cr, filename=safe_media_filename(media_title, cr.suffix or ".mp4")), caption=caption or None, supports_streaming=True)
                 except Exception as e:
                     logger.exception("Autopost failed uid=%s channel=%s", j.uid, ch.get("channel_id"))
                     safe = user_facing_error(e)
