@@ -59,6 +59,7 @@ class AdminPremiumTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "test.db"
             with patch.object(db, "DB_PATH", db_path), patch.object(db, "ensure_directories", lambda: None):
+                db.init_db()
                 self.assertRaises(ValueError, admin_premium._grant_sync, 999, 30)
 
 
