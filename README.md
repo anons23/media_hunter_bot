@@ -28,7 +28,7 @@ With the default configuration:
 - up to **80 MB**: process/unique without forced compression;
 - **80–100 MB**: process, then use a compressed fallback if necessary;
 - over **100 MB** and up to the source safety limit: send the original without unique processing;
-- source/user uploads are capped at **1536 MB (1.5 GB)** by default.
+- source/user uploads are capped at **1024 MB (1 GB)** by default.
 
 The 100 MB value is the logical unique-processing threshold, not the Telegram transport limit. A local Telegram Bot API can accept larger files according to its configured capabilities.
 
