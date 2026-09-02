@@ -27,8 +27,33 @@ def _B(text: str, data: str | None = None, url: str | None = None) -> InlineKeyb
     return InlineKeyboardButton(text=text, callback_data=data, url=url)
 
 
+def _friendly_menu(menu_fn, uid: int) -> InlineKeyboardMarkup:
+    labels = {
+        "upload": "📤 Загрузить видео",
+        "premium": "⭐ Премиум",
+        "restart": "🔄 Отменить мои задачи",
+        "admin": "👑 Админка",
+    }
+    original = menu_fn(uid)
+    rows = []
+    for row in original.inline_keyboard:
+        rows.append([
+            InlineKeyboardButton(
+                text=labels.get(button.callback_data, button.text),
+                callback_data=button.callback_data,
+                url=button.url,
+            )
+            for button in row
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def register_opp_admin(router: Router, menu_fn) -> None:
     """Attach OPP report/export/retain handlers to the main router."""
+    base_menu_fn = menu_fn
+
+    def menu_fn(uid: int) -> InlineKeyboardMarkup:
+        return _friendly_menu(base_menu_fn, uid)
 
     @router.callback_query(F.data == "aopp_reports")
     async def aopp_reports(c: CallbackQuery, state: FSMContext):
@@ -88,7 +113,7 @@ def register_opp_admin(router: Router, menu_fn) -> None:
         await c.message.edit_text(
             text,
             reply_markup=_kb([
-                [_B("📄 Выгрузить user_id", f"aopp_export:{cid}")],
+                [_B("📄 Выгрузить список пользователей", f"aopp_export:{cid}")],
                 [_B("◀️ К списку", "aopp_reports")],
                 [_B("◀️ Админка", "admin")],
             ]),
