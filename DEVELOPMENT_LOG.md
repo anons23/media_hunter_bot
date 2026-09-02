@@ -24,189 +24,102 @@
 - **Бизнес-требование: все видео до 100 MB включительно должны проходить уникализацию.**
 - Видео больше 100 MB не должны искусственно уникализироваться ради этого требования.
 
-## Ранее выполнено
-
-### Security
-- ✅ SSRF защита `validate_source_url`: HTTP/HTTPS, запрет credentials/control chars, localhost/metadata/internal suffixes, non-global literal/resolved IP.
+## Security / media baseline
+- ✅ SSRF защита `validate_source_url`.
 - ⚠️ Остаточный риск DNS rebinding/redirect-to-internal; mitigation — unprivileged user + egress isolation.
 - ✅ Logo path confinement.
 - ✅ Queue/restart race через `asyncio.Lock`.
 - ✅ Queue accounting и `task_done()` при restart.
 - ✅ Restart завершает subprocess и чистит uploads.
 - ✅ Upload проверяет очередь до скачивания.
-- ✅ Reboot VPS из бота удалён.
 - ✅ Payment activation атомарна; `telegram_charge_id` unique.
 - ✅ Referral assignment защищён `AND referred_by IS NULL`.
 - ✅ OPP private invite fail-closed.
 - ✅ User errors фильтруются через `user_errors.py`.
-
-### Media
 - ✅ `download()` использует `--write-info-json`.
-- ✅ `safe_media_filename()` и сохранение исходного названия.
-- ✅ Text watermark: цвет, шрифт, размер, позиция, прозрачность.
-- ✅ Logo watermark: относительный размер, позиция, прозрачность.
+- ✅ `safe_media_filename()` сохраняет исходное название.
+- ✅ Text/logo watermark поддерживают настройки размера, позиции и прозрачности.
 - ✅ Source/upload limit 1024 MB.
-- ✅ `yt-dlp --max-filesize` и post-download checks.
-- ⚠️ FFmpeg ранее логировал только первые 2000 символов stderr; настоящий финальный error line при `code=187` ещё нужно сделать видимым.
-- ⚠️ Уникализация — полноценный FFmpeg re-encode и тяжёлая фильтрация; проверить производительность на VPS.
 
-### Dependencies
+## Dependencies
 - ✅ `aiogram==3.31.0`
 - ✅ `aiohttp==3.14.3`
 - ✅ `python-dotenv==1.1.1`
 - ✅ `yt-dlp==2026.8.19`
 - ✅ `curl-cffi==0.15.0`
-- ✅ TikTok impersonation issue исправлен.
-
-### UI / watermark
-- ✅ Русские подписи.
-- ✅ «Моё видео» — собственная загрузка.
-- ✅ Text watermark wizard: текст → цвет → шрифт → размер → позиция → прозрачность → сохранение.
-- ✅ Logo wizard: PNG → размер → позиция → прозрачность → сохранение.
-- ✅ Logo size presets: 10/20/30/40/50%.
-- ✅ Logo масштабируется с учётом размеров кадра.
-- ⚠️ В проекте есть старые/новые участки watermark flow; не плодить новые дубликаты.
 
 ## Серверный инцидент 2026-09-02
 - ✅ `media-hunter.service` ранее терял `127.0.0.1:8081`.
 - ✅ Причина: права `mediahunter` на `/var/lib/telegram-bot-api`.
 - ✅ Исправлено владение каталогом и `temp` на `mediahunter:mediahunter`.
-- ✅ Local Bot API стал `active/running`, слушает `127.0.0.1:8081`.
-- ✅ Media Hunter вернулся в polling и обрабатывал updates.
-- 🔐 Bot Token ранее был раскрыт в диагностическом выводе; перед production следует перевыпустить через BotFather. В журнал токен не писать.
+- ✅ Local Bot API стал `active/running`.
+- ✅ Media Hunter вернулся в polling.
+- 🔐 Bot Token был раскрыт в диагностическом выводе; перед production следует перевыпустить через BotFather. В журнал токен не писать.
 
 ## FFmpeg incident 2026-09-02
 - FFmpeg 6.1.1 на VPS.
-- Для некоторых входов виден `libdav1d 1.4.1`.
 - Разные MP4 приводили к `ffmpeg failed (code=187)`.
-- После ошибки приложение показывало общий `RuntimeError`.
-- По имеющемуся журналу финальная строка FFmpeg не видна из-за обрезки stderr.
-- `187` сам по себе не считается доказательством конкретной причины.
+- Подтверждённая причина старого фильтра: дробный `scale` мог давать нечётные размеры перед `libx264`, после чего кодирование падало.
+- Старый фильтр был заменён безопасным even-dimension вариантом.
+- Добавлен `optimized_processor.py`: лёгкий `eq`, без `unsharp`/`noise`, `-threads 2`, `-preset veryfast`, `crf 27` для обычной уникализации и `crf 30` для compression path.
+- Требование `<=100 MB` не изменено: такие видео уникализируются.
+- ⚠️ FFmpeg stderr стоит логировать диагностичнее, сохраняя хвост ошибки.
 
-## Пользовательские требования 2026-09-02
-1. Уникализировать все видео <100 MB; фактически безопаснее считать порог `<=100 MB`.
-2. Убрать двойную уникализацию.
-3. После перехода из «Каналы»/описаний в другой раздел старое информационное сообщение не должно оставаться отдельным сообщением снизу.
+## UI / watermark
+- ✅ Русские подписи.
+- ✅ `Моё видео` — собственная загрузка.
+- ✅ Text watermark wizard.
+- ✅ Logo wizard.
+- ✅ Logo presets 10/20/30/40/50%.
+- ✅ Главные кнопки `💧 Водяной знак` и `⚙️ Настройки` скрыты; формат доступен через `📥 Скачать`.
+- ✅ Channel watermark callback использует `cwmx:`.
+- ✅ Исправлен middleware, который после `cwmx:*` подменял клавиатуру и возвращал пользователя назад.
+- ⚠️ В проекте есть старые/новые участки watermark flow; не плодить новые дубликаты.
 
-## Изменения текущего сеанса
-
-### UI stale-description
-- ✅ `wm_wizard.py` middleware изменён так, чтобы навигация оставалась в текущем сообщении через `edit_text`/`edit_reply_markup`, без отдельного `answer(info...)`.
-- ✅ Добавлен regression test, проверяющий отсутствие stale-info отправки.
-- ⚠️ Нужен runtime smoke test в Telegram.
-
-### UI tests
-- ✅ `tests/test_ui.py` приведён в соответствие с текущими русскими названиями кнопок.
-- ✅ Тест stale-description теперь проверяет реальную реализацию middleware, а не удалённый `_MAIN_MENU_INFO`.
-
-### Callback
-- ✅ Канальный watermark callback в рабочем `handlers.py`: `cwmx:`.
-- ⚠️ Проверять все остальные места на старый `cwm:` перед дальнейшими UI-правками.
-
-### Важная ошибка предыдущей попытки
-- ❌ Была сделана неполная массовая замена `handlers.py`, которая вырезала существующую функциональность и вызвала CI ошибки (`MAX_USER_QUEUE`, `metadata`, UI).
-- ✅ Эта неполная версия отменена: полный `handlers.py` восстановлен из рабочей точки `6842889`.
-- Commit восстановления: `a559a8dc79447a0e65a04009226b9d0123b5bc78`.
+## Важная ошибка предыдущей попытки
+- ❌ Неполная массовая замена `handlers.py` вырезала существующую функциональность и вызвала CI ошибки (`MAX_USER_QUEUE`, `metadata`, UI).
+- ✅ Полный `handlers.py` восстановлен из рабочей точки `6842889`.
+- Restore commit: `a559a8dc79447a0e65a04009226b9d0123b5bc78`.
 - Не считать неполную замену частью production-кода.
 
-### Текущее состояние уникализации
-- ✅ После восстановления полного `handlers.py` вернулась логика рабочей точки `6842889`.
-- В этой логике для видео до 100 MB выполняется unique processing.
-- При включённых каналах обработка строится от исходного файла для channel output, вместо обязательной предварительной обработки пользовательского результата с последующей повторной обработкой того же результата.
-- Если разные каналы имеют разные watermark, отдельный FFmpeg output для каждого канала допустим и не считается двойной обработкой одного результата.
-- ⬜ Добавить отдельный regression test, который явно фиксирует количество `process_media` вызовов для private-send/channel сценариев.
+## Autopost / двойная обработка
+- Текущий `_run_job()` после private processing снова вызывает `process_media(source, ..., channel_wm)` для enabled channels.
+- Это не повторная обработка уже созданного файла, потому что channel processing идёт от исходника, но для совпадающего watermark это всё равно лишний encode.
+- Требуется рефакторинг: при совпадающем эффективном watermark переиспользовать private output; для разных watermark отдельный output допустим; одинаковые channel profiles должны использовать один результат.
+- ⬜ Добавить regression test на количество `process_media` вызовов.
 
-## CI
-Workflow: `.github/workflows/tests.yml`.
-- Trigger: push/PR в `Media_hanter-v3-security` + manual dispatch.
-- Install dependencies → compile → `unittest discover`.
+## Local Bot API upload/logo bug — 2026-09-02
+- Production log показал, что `Моё видео` падает **до FFmpeg**.
+- Ошибка: HTTP 404 на URL вида `/file/botTOKEN//var/lib/telegram-bot-api/...`.
+- Local Bot API возвращает абсолютный filesystem path, но aiogram session была создана через `TelegramAPIServer.from_base(LOCAL_BOT_API)` без `is_local=True`.
+- Поэтому `bot.download_file()` ошибочно пытался скачать локальный путь через HTTP.
+- Та же цепочка используется при загрузке logo, поэтому logo upload имел тот же корень.
+- ✅ В `media_hunter_bot/__init__.py` добавлен bootstrap fix: `TelegramAPIServer.from_base()` получает `is_local=True` по умолчанию.
+- Fix выполняется до создания `AiohttpSession` в `handlers.py`.
+- Commit: `046fbb3efc38873deb07df28ca07249b96a66ac3`.
+- ⬜ Production smoke test `Моё видео`.
+- ⬜ Production smoke test PNG logo.
+- ⬜ Production smoke test video + logo.
 
-### CI run 33647655449 / commit 731956c
-- ❌ Regression tests.
-- Причины: неполная версия `handlers.py` после ошибочной массовой замены:
-  - `MAX_USER_QUEUE` missing import.
-  - `metadata` ошибочно await-ился.
-  - oversized-source test не доходил до проверки send limit.
-  - старые UI tests ожидали `_MAIN_MENU_INFO` и старые подписи.
+## Tests / CI
+- `.github/workflows/tests.yml`: install dependencies → compile → `unittest discover`.
+- Run `33648480341` — ✅ success.
+- Run `33651556824` — ✅ success.
+- Run `33653931005` — ✅ success.
+- Run `33655342998` на `046fbb3e...` — ✅ success.
+- Run `33655394965` на `bc8f2e37...` — проверяет Local Bot API regression; результат на момент записи ещё не подтверждён.
 
-### CI после восстановления
-- Run `33648442338` на промежуточном commit журнала: проверки прошли после восстановления/уточнения тестов; не использовать этот run как финальный head.
-- Run `33648480341` на commit `a559a8dc79447a0e65a04009226b9d0123b5bc78`: **✅ success**.
-- Install dependencies: ✅
-- Compile: ✅
-- Regression tests: ✅
-- Post cleanup: ✅
+## Последние commits
+- `704be780aed7d80eb1cd58b05fb715375086bfcf` — Document FFmpeg optimization and UI fixes.
+- `046fbb3efc38873deb07df28ca07249b96a66ac3` — Fix Local Bot API file downloads.
+- `bc8f2e374227f78bffdc41f98744b28d7889a2eb` — Add Local Bot API regression test.
 
-Финальный green CI подтверждён для полного восстановленного `handlers.py` + текущих UI tests.
-
-## Исправление FFmpeg уникализации 2026-09-02
-- Аудит подтвердил опасное место в `_unique_video_filters()`: старые дробные `scale=iw*0.998:ih*0.998` и обратный scale могли округлять размеры вертикального видео до нечётных значений перед `libx264`.
-- Это воспроизводимо на типичных размерах вроде 720×1280: промежуточный размер мог стать 719×1279; `libx264` с `yuv420p` может отказать с `width not divisible by 2`.
-- Код `processor.py` намеренно не переписывался массово после предыдущей неудачной замены `handlers.py`.
-- ✅ Добавлен `media_hunter_bot/unique_filter.py` с безопасным FFmpeg expression, который после обеих стадий scale явно округляет ширину/высоту к ближайшему меньшему чётному значению.
-- ✅ Существующий `processor.process_media()` использует новый фильтр через безопасное bootstrap-переопределение в `media_hunter_bot/__init__.py`; остальной processor/handlers не переписывался.
-- ✅ Добавлен `tests/test_media_uniqueness.py`: проверяет подключение безопасного фильтра и чётность размеров для типичных вертикальных входов.
-- Commits: `a30907ac9cd57fdf97047812f39f23dc8753f58b`, `5906c9e10eadd76126a3b678aa57d95fa53d6ef4`, `fa5b9708b59470d855a5742791d23a15f822790e`, `bc7e498f880c29b6330c5eef43192ed91fe9e18e`.
-- ⚠️ На момент записи этого раздела новый CI для `bc7e498f...` ещё выполнялся; production deployment не подтверждён.
-- ⬜ После green CI сделать VPS smoke test на реальном TikTok/YouTube ролике <=100 MB.
-- ⬜ После smoke test проверить отсутствие повторной обработки и размер/отправку результата.
-
-## Оптимизация FFmpeg и UI 2026-09-02
-- Production smoke test на новой безопасной уникализации показал, что исходный ролик 28 MB реально кодировался, `output.mp4` вырос до 69 MB за 5+ минут, CPU держался около 97%, а FFmpeg использовал `-threads 1`.
-- Это подтвердило: исправление нечётных размеров работает, но старый фильтр `scale → scale → eq → unsharp → noise` слишком тяжёлый и может существенно раздувать результат.
-- ✅ Добавлен `media_hunter_bot/optimized_processor.py`.
-- ✅ Новый unique filter: один безопасный even-dimension scale + лёгкий `eq`; удалены дорогие `unsharp` и per-frame `noise`.
-- ✅ Video encoder ограничен `-threads 2` вместо `-threads 1`, preset `veryfast`; обычная уникализация использует `crf 27`, compress path — `crf 30`.
-- ✅ Требование уникализации не изменено: для видео `<=100 MB` `handlers.py` продолжает вызывать `process_media`.
-- ✅ `media_hunter_bot/__init__.py` применяет оптимизированный `process_media` до того, как `handlers.py` импортирует функцию.
-- ✅ UI: главные кнопки `💧 Водяной знак` и `⚙️ Настройки` скрыты; формат по-прежнему доступен внутри `📥 Скачать`.
-- ✅ UI bug `Каналы → канал → Водяной знак`: причиной был `_MainMenuInfoMiddleware`, который после `cwmx:*` заново подменял клавиатуру меню канала. Bootstrap теперь отключает эту пост-обработку; экран channel watermark остаётся на месте.
-- ✅ Обновлены `tests/test_media_uniqueness.py` и `tests/test_ui.py` для лёгкого фильтра и упрощённого UI.
-- Commits этой серии: `ae282ecc7975abae861ccc2e0326c97c6a5de54a`, `c5be1ee846086bae367e7209f1446a211114df4c`, `6a7fad13197b4bebe1875d59f5d1c2850dd37ada`, `0983633f863de84a8d53a803257192bffab7ff61`, `3d5214abef5284d64afeea8a3e8a02b6f73a1aeb`, `0ce5447331106055c706b314fd44955fdcb80c2c`.
-- ⬜ Финальный CI для текущего HEAD.
-- ⬜ VPS deployment текущего HEAD и smoke test реального видео <=100 MB.
-- ⬜ Проверить фактическое время/CPU/итоговый размер нового encode.
-- ⬜ Runtime smoke test `Каналы → канал → Водяной знак`.
-- ⬜ Runtime smoke test загрузки PNG-логотипа.
-
-## Что осталось сделать
-- ⬜ Runtime Telegram smoke test UI: перейти `Каналы` → `Водяной знак` → другие разделы и убедиться, что старое описание не остаётся снизу.
-- ⬜ Runtime smoke test логотипа.
-- ⬜ Runtime smoke test видео <=100 MB с URL.
-- ⬜ Regression test на отсутствие лишнего `process_media` pass.
-- ⬜ Проверить все `cwm:`/`cwmx:` references.
-- ⬜ Исправить FFmpeg stderr logging: начало + последние строки.
-- ⬜ По свежему полному journal определить точную причину `code=187`.
-- ⬜ После production deployment проверить systemd journal.
-
-## Production deployment checklist
-
-```bash
-cd /opt/mediahunter/app
-git remote -v
-git branch --show-current
-git status
-git log -1 --oneline
-sudo cp -a /opt/mediahunter/app /opt/mediahunter/app_backup_$(date +%Y%m%d_%H%M%S)
-```
-
-```bash
-git fetch origin
-git checkout Media_hanter-v3-security
-git reset --hard origin/Media_hanter-v3-security
-```
-
-```bash
-/opt/mediahunter/venv/bin/python -m py_compile media_hunter_bot/processor.py media_hunter_bot/handlers.py media_hunter_bot/db.py media_hunter_bot/config.py main.py
-```
-
-```bash
-systemctl restart telegram-bot-api.service
-systemctl status telegram-bot-api.service --no-pager -l
-systemctl restart media-hunter.service
-systemctl status media-hunter.service --no-pager -l
-journalctl -u media-hunter.service -n 100 --no-pager -o cat
-```
-
-## Для следующего ИИ
-Сначала прочитать этот журнал. Не предполагать, что предыдущий ассистент действительно применил правку: проверять commit/tree/diff и CI. После каждой правки обновлять этот журнал.
+## Handoff
+1. ⬜ Дождаться green CI для `bc8f2e37...`.
+2. ⬜ Deploy branch head to VPS и restart `media-hunter.service`.
+3. ⬜ Проверить `Моё видео`.
+4. ⬜ Проверить PNG logo и video+logo.
+5. ⬜ Проверить enabled autopost.
+6. ⬜ Исправить/rework duplicate processing и добавить regression test.
+7. ⬜ Улучшить stderr logging FFmpeg.
+8. 🔐 Перевыпустить Bot Token через BotFather из-за раскрытия в логах.
