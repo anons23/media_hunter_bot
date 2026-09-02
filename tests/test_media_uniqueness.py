@@ -35,6 +35,13 @@ class MediaUniquenessRegressionTests(unittest.TestCase):
         source = inspect.getsource(__import__("media_hunter_bot"))
         self.assertIn('kwargs.setdefault("is_local", True)', source)
 
+    def test_cached_process_entry_accepts_legacy_positional_call(self):
+        import media_hunter_bot
+
+        signature = inspect.signature(media_hunter_bot._cached_process_entry)
+        for name in ("audio_only", "compress", "register"):
+            self.assertNotEqual(signature.parameters[name].kind, inspect.Parameter.KEYWORD_ONLY)
+
     def test_identical_processing_profile_is_reused(self):
         from media_hunter_bot.process_cache import cached_process_media, clear
 
