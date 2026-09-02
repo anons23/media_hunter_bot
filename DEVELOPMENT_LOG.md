@@ -86,7 +86,10 @@
 - Текущий `_run_job()` после private processing снова вызывает `process_media(source, ..., channel_wm)` для enabled channels.
 - Это не повторная обработка уже созданного файла, потому что channel processing идёт от исходника, но для совпадающего watermark это всё равно лишний encode.
 - Требуется рефакторинг: при совпадающем эффективном watermark переиспользовать private output; для разных watermark отдельный output допустим; одинаковые channel profiles должны использовать один результат.
-- ⬜ Добавить regression test на количество `process_media` вызовов.
+- ✅ Добавлен `media_hunter_bot/process_cache.py`: кэш результата ограничен комбинацией source/work/watermark/audio_only/compress, поэтому повторно используется только результат внутри того же job и только при полностью совпадающем профиле.
+- ✅ `media_hunter_bot/__init__.py` оборачивает оптимизированный `process_media` через этот cache до импорта `handlers.py`.
+- ✅ Разные watermark и разные режимы compression получают независимые FFmpeg outputs.
+- ⬜ Production проверить, что private + channel с одинаковым watermark дают один FFmpeg run.
 
 ## Local Bot API upload/logo bug — 2026-09-02
 - Production log показал, что `Моё видео` падает **до FFmpeg**.
@@ -107,19 +110,22 @@
 - Run `33651556824` — ✅ success.
 - Run `33653931005` — ✅ success.
 - Run `33655342998` на `046fbb3e...` — ✅ success.
-- Run `33655394965` на `bc8f2e37...` — проверяет Local Bot API regression; результат на момент записи ещё не подтверждён.
+- Run `33655394965` на `bc8f2e37...` — Local Bot API regression.
+- ⬜ CI для commits `a26db9ec...`, `2c8dd1ca...`, `dacd9e38...` после добавления processing cache ещё не подтверждён.
 
 ## Последние commits
-- `704be780aed7d80eb1cd58b05fb715375086bfcf` — Document FFmpeg optimization and UI fixes.
+- `a26db9ec361e2fa9bd58be3ccd069e9894fd7838` — Avoid duplicate media processing for identical watermark profiles.
+- `2c8dd1ca4a20ead1f32a826fe0e50edc1b4f69c5` — Reuse identical processing results during autopost.
+- `dacd9e387a65377e1e8bf2933155d4f2613fb8ab` — Test reuse of identical processing results.
 - `046fbb3efc38873deb07df28ca07249b96a66ac3` — Fix Local Bot API file downloads.
-- `bc8f2e374227f78bffdc41f98744b28d7889a2eb` — Add Local Bot API regression test.
+- `704be780aed7d80eb1cd58b05fb715375086bfcf` — Document FFmpeg optimization and UI fixes.
 
 ## Handoff
-1. ⬜ Дождаться green CI для `bc8f2e37...`.
+1. ⬜ Дождаться green CI для текущего head.
 2. ⬜ Deploy branch head to VPS и restart `media-hunter.service`.
 3. ⬜ Проверить `Моё видео`.
 4. ⬜ Проверить PNG logo и video+logo.
 5. ⬜ Проверить enabled autopost.
-6. ⬜ Исправить/rework duplicate processing и добавить regression test.
+6. ⬜ Проверить, что одинаковый watermark не запускает второй FFmpeg.
 7. ⬜ Улучшить stderr logging FFmpeg.
 8. 🔐 Перевыпустить Bot Token через BotFather из-за раскрытия в логах.
