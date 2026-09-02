@@ -151,6 +151,24 @@ Workflow: `.github/workflows/tests.yml`.
 - ⬜ После green CI сделать VPS smoke test на реальном TikTok/YouTube ролике <=100 MB.
 - ⬜ После smoke test проверить отсутствие повторной обработки и размер/отправку результата.
 
+## Оптимизация FFmpeg и UI 2026-09-02
+- Production smoke test на новой безопасной уникализации показал, что исходный ролик 28 MB реально кодировался, `output.mp4` вырос до 69 MB за 5+ минут, CPU держался около 97%, а FFmpeg использовал `-threads 1`.
+- Это подтвердило: исправление нечётных размеров работает, но старый фильтр `scale → scale → eq → unsharp → noise` слишком тяжёлый и может существенно раздувать результат.
+- ✅ Добавлен `media_hunter_bot/optimized_processor.py`.
+- ✅ Новый unique filter: один безопасный even-dimension scale + лёгкий `eq`; удалены дорогие `unsharp` и per-frame `noise`.
+- ✅ Video encoder ограничен `-threads 2` вместо `-threads 1`, preset `veryfast`; обычная уникализация использует `crf 27`, compress path — `crf 30`.
+- ✅ Требование уникализации не изменено: для видео `<=100 MB` `handlers.py` продолжает вызывать `process_media`.
+- ✅ `media_hunter_bot/__init__.py` применяет оптимизированный `process_media` до того, как `handlers.py` импортирует функцию.
+- ✅ UI: главные кнопки `💧 Водяной знак` и `⚙️ Настройки` скрыты; формат по-прежнему доступен внутри `📥 Скачать`.
+- ✅ UI bug `Каналы → канал → Водяной знак`: причиной был `_MainMenuInfoMiddleware`, который после `cwmx:*` заново подменял клавиатуру меню канала. Bootstrap теперь отключает эту пост-обработку; экран channel watermark остаётся на месте.
+- ✅ Обновлены `tests/test_media_uniqueness.py` и `tests/test_ui.py` для лёгкого фильтра и упрощённого UI.
+- Commits этой серии: `ae282ecc7975abae861ccc2e0326c97c6a5de54a`, `c5be1ee846086bae367e7209f1446a211114df4c`, `6a7fad13197b4bebe1875d59f5d1c2850dd37ada`, `0983633f863de84a8d53a803257192bffab7ff61`, `3d5214abef5284d64afeea8a3e8a02b6f73a1aeb`, `0ce5447331106055c706b314fd44955fdcb80c2c`.
+- ⬜ Финальный CI для текущего HEAD.
+- ⬜ VPS deployment текущего HEAD и smoke test реального видео <=100 MB.
+- ⬜ Проверить фактическое время/CPU/итоговый размер нового encode.
+- ⬜ Runtime smoke test `Каналы → канал → Водяной знак`.
+- ⬜ Runtime smoke test загрузки PNG-логотипа.
+
 ## Что осталось сделать
 - ⬜ Runtime Telegram smoke test UI: перейти `Каналы` → `Водяной знак` → другие разделы и убедиться, что старое описание не остаётся снизу.
 - ⬜ Runtime smoke test логотипа.
