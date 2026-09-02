@@ -202,8 +202,16 @@ def register_wm_wizard(router: Router, menu_fn) -> None:
     base_menu_fn = menu_fn
     router.callback_query.middleware(_MainMenuInfoMiddleware())
 
-    def menu_fn(uid: int) -> InlineKeyboardMarkup:
+    def friendly_main_menu(uid: int) -> InlineKeyboardMarkup:
         return _friendly_menu(base_menu_fn, uid)
+
+    # handlers.py calls its global menu() directly. Replace that function at
+    # registration time so /start and all normal returns use the same labels.
+    try:
+        from . import handlers as handlers_module
+        handlers_module.menu = friendly_main_menu
+    except Exception:
+        pass
 
     @router.callback_query(F.data.in_({"wmtext", "cwmtext"}))
     async def wm_start_text(c: CallbackQuery, state: FSMContext):
