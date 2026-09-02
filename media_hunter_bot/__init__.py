@@ -75,9 +75,10 @@ async def _patched_middleware_call(self, handler, event, data):
 _wm_wizard.register_wm_wizard = _patched_register_wm_wizard
 _wm_wizard._MainMenuInfoMiddleware.__call__ = _patched_middleware_call
 
+# Keep these processing callables alive: _cached_process_entry is invoked later
+# by handlers/wm_wizard in a worker thread and resolves them from its globals.
+# Deleting them here causes production-only NameError after the service starts.
 del _processor
-del _optimized_process_media
 del _safe_unique_video_filters
-del _cached_process_media
 del _TelegramAPIServer
 del _wm_wizard
