@@ -16,11 +16,14 @@ from media_hunter_bot import handlers as _handlers
 from media_hunter_bot import about as _about
 from media_hunter_bot import ux_fixes as _ux_fixes
 from media_hunter_bot import runtime_diagnostics as _runtime_diagnostics
+from media_hunter_bot import pipeline_diagnostics as _pipeline_diagnostics
 from aiogram import Bot as _Bot
 
 playlist_support.patch_engine(_handlers.Engine, _handlers)
 _runtime_diagnostics.patch_engine(_handlers.Engine)
 _runtime_diagnostics.patch_bot_downloads(_Bot)
+_pipeline_diagnostics.patch_handlers(_handlers)
+_pipeline_diagnostics.patch_bot_sends(_Bot)
 _handlers.menu = _about.register_about(_handlers.router, _handlers.menu)
 _ux_fixes.patch_router(_handlers.router)
 
