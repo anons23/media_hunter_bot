@@ -41,7 +41,7 @@ async def _handle_photo(message: Message, bot, state) -> bool:
         if message.photo[-1].file_size and message.photo[-1].file_size > MAX_WATERMARK_MB * 1024 * 1024:
             await message.answer(f"❌ Нужен логотип до {MAX_WATERMARK_MB} МБ.")
             return True
-        await asyncio.wait_for(LOGO_DIR.mkdir(parents=True, exist_ok=True), timeout=5)
+        await asyncio.wait_for(asyncio.to_thread(LOGO_DIR.mkdir, parents=True, exist_ok=True), timeout=5)
         f = await asyncio.wait_for(bot.get_file(size.file_id), timeout=60)
         await asyncio.wait_for(bot.download_file(f.file_path, destination=jpg), timeout=300)
         if jpg.stat().st_size > MAX_WATERMARK_MB * 1024 * 1024:
