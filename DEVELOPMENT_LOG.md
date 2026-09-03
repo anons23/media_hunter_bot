@@ -19,6 +19,7 @@
 - Production Python: `/opt/mediahunter/venv/bin/python`.
 - Service: `media-hunter.service`.
 - Local Bot API: `127.0.0.1:8081`.
+- DB path по умолчанию: `data/media_hunter.sqlite3`; фактический путь определяется `MEDIA_HUNTER_HOME`.
 - Source/upload absolute limit: 1024 MB.
 - **Все видео <=100 MB обязательно уникализируются.**
 - Видео >100 MB не уникализируются искусственно ради этого требования.
@@ -47,7 +48,7 @@
 ## Local Bot API / logo
 - ✅ `TelegramAPIServer.from_base()` patched in `media_hunter_bot/__init__.py` to default `is_local=True`.
 - Причина: Local Bot API возвращает абсолютный filesystem path; без `is_local=True` aiogram пытался запрашивать `/file/bot.../<absolute path>` через HTTP.
-- Logo upload использует ту же исправленную цепочку.
+- Logo upload использует исправленную цепочку.
 - 🔐 Bot Token ранее попал в диагностический вывод. Не записывать его в журнал; перед production требуется перевыпуск через BotFather.
 
 ## UI / watermark
@@ -57,85 +58,75 @@
 - ✅ Главные кнопки `💧 Водяной знак` и `⚙️ Настройки` скрыты; формат доступен через `📥 Скачать`.
 - ✅ Channel watermark callback использует `cwmx:`.
 - ✅ Убран middleware, который после `cwmx:*` перезаписывал экран.
-- ⚠️ В `handlers.py` существуют старые/новые участки watermark flow; не плодить дубликаты.
-- ✅ `ℹ️ Что я умею` добавлена с простой формулировкой и иконками; HTML `<b>` в обычном тексте больше не должен отображаться как сырой тег.
+- ⚠️ В `handlers.py` существуют старые/новые участки watermark flow; не плодить дубликаты и не делать широких rewrite.
+- ✅ `🤖 Возможности`/about использует простые русские формулировки и иконки; сырой HTML `<b>` не должен показываться пользователю.
 - ✅ При открытии text/logo watermark пользователь видит уже настроенное значение и может его изменить или удалить.
 - ✅ Autopost toggle использует async DB API `aset_channel_enabled()`.
 
+## Legacy watermark template — 2026-09-03
+### Диагностика
+- Пользователь сообщил, что бот автоматически добавляет старый watermark `Мой канал`, оставшийся от прежней кнопки watermark в главном меню.
+- Поиск `/opt/mediahunter/app` нашёл `Мой канал` только в `wm_wizard.py` как текст примера ввода: `Например: <code>Мой канал</code>`.
+- Проверка таблицы `settings` не обнаружила этот текст.
+- Поиск по всем таблицам БД `data/media_hunter.sqlite3` также не обнаружил `Мой канал`.
+- Важно: `config.DB_PATH` учитывает `MEDIA_HUNTER_HOME`, поэтому ручная проверка относительного `data/...` может отличаться от production DB, если переменная окружения задана.
+
+### Исправление
+- Добавлен `media_hunter_bot/legacy_watermark_guard.py`.
+- При старте бот один раз проверяет **фактический `config.DB_PATH`** и удаляет из `users.watermark`/`channels.watermark` только точный legacy placeholder `type=text, text=Мой канал`.
+- Устанавливается marker `settings.legacy_watermark_cleanup_v1=done`, поэтому пользователь может в будущем сознательно настроить текст `Мой канал`, и он больше не будет удаляться на каждом рестарте.
+- Cleanup ничего не меняет, если placeholder отсутствует.
+- В `main.py` migration вызывается перед `asyncio.run(main())`.
+- Добавлены regression tests для one-shot cleanup и сохранения нового пользовательского значения.
+- Commits:
+  - `51e0650457efc08ad394a7b4e762ce88ec586f92` — guard module.
+  - `af09e27fd8f18459557dcd9b06bfb0cfed8dec6b` — tests.
+  - `ae8c6192c8c92289e611378a3ffd1cc669fb7b50` — initial main integration.
+  - `8d9d4712bfcb6714cdfdfaa224bc85d78cbf4aa0` — simplified main integration.
+- CI run `33775146383` for `ae8c6192...` — ✅ success.
+- CI run `33775162559` for `8d9d4712...` — compile and regression tests completed successfully; final workflow state should be rechecked before production deploy.
+
 ## Telegram command menu
-- В `media_hunter_bot/__init__.py` после успешного `Bot.get_me()` вызывается `delete_my_commands()` для очистки старого default command menu.
+- `media_hunter_bot/__init__.py` после успешного `Bot.get_me()` вызывает `delete_my_commands()` для очистки старого default command menu.
 - Commit: `59c20fb4ae8183e210c5521c1172640d5f1300a5`.
 - ⬜ Если старые команды Telegram всё ещё видны, проверить scoped commands/languages через BotFather/API.
 
-## Autopost: exact-copy режим — 2026-09-03
-### Что было
-- `_run_job()` сначала создавал `result` для private send, затем для каждого enabled channel снова вызывал `process_media(source, ..., channel_wm)`.
-- Production smoke test показывал два последовательных `PROCESS_START` примерно по 3–4 секунды каждый. Ошибок уже не было, но видео кодировалось повторно.
-- Предыдущий cache был привязан к source + work + watermark + audio_only + compress. Поэтому разные watermark профили давали `MISS` и второй FFmpeg.
-
-### Новое требование пользователя
-- После того как бот отправил готовое видео пользователю, **не переделывать его для автопоста**.
-- В канал должен уходить **тот же самый готовый результат**.
-- Это сохраняет одну уникализацию/обработку на job и устраняет второй encode.
-- Следствие: отдельный channel watermark больше не применяется к автопост-копии. Если пользователю нужен другой watermark именно в канале, это уже отдельный режим и потребует дополнительной обработки.
-
-### Реализация
-- `media_hunter_bot/process_cache.py` кэшировал по `source + work + audio_only + compress`; watermark был исключён из cache key.
-- Это давало exact-copy для одного канала, но при нескольких каналах не позволяло каждому каналу иметь собственный watermark.
+## Autopost: exact-copy режим
+- Первоначальная проблема: `_run_job()` мог повторно вызвать `process_media()` для каждого enabled channel, что давало второй FFmpeg encode.
+- Cache key был изменён на `source + work + audio_only + compress`, без watermark, чтобы при 0/1 enabled channel канал получал тот же готовый результат.
 - Exact-copy code commit: `95ea3fcf8903ac29489a06816512b21b6d9e33fe`.
 - Test fix commit: `a90d72b3bc7a3a6474fe27d45cef165d130316e3`.
+- Подтверждённый CI для test fix: run `33765082009` — ✅ green.
 
 ## Autopost: frozen unique base + channel variants — 2026-09-03
 ### Новая схема
-- Пользователь предложил разделить обработку на два этапа: один раз сделать уникализацию и сохранить её результат, а затем накладывать разные watermark для нескольких каналов.
-- Реализована схема:
-  - **0/1 enabled autopost channel:** сохраняется быстрый exact-copy режим — один готовый результат используется повторно.
-  - **2–3 enabled autopost channels:** сначала один раз создаётся `unique_base.mp4` **без watermark**; этот файл считается зафиксированной уникализированной базой текущего job.
-  - Пользовательский результат и каждый channel result создаются из `unique_base.mp4` через watermark-only стадию.
-  - Повторная уникализация для второго/третьего канала не выполняется.
-- `unique_base.mp4` хранится в том же временном `work` каталоге до завершения job; существующий cleanup удаляет каталог после отправок. Это и есть контролируемая временная фиксация результата вместо искусственной `sleep()` паузы.
-- Варианты watermark получают отдельные файлы `watermark_<profile>.mp4`, поэтому разные настройки каналов не конфликтуют.
-- Если watermark отсутствует, возвращается сам `unique_base.mp4` без лишнего FFmpeg.
+- **0/1 enabled autopost channel:** exact-copy, один готовый результат используется повторно.
+- **2–3 enabled autopost channels:** сначала один раз создаётся `unique_base.mp4` без watermark; затем из этой базы делаются watermark-only variants.
+- Пользовательский результат и channel variants не запускают uniqueness повторно.
+- `unique_base.mp4` живёт в текущем `work` каталоге до cleanup job.
+- Варианты называются `watermark_<profile>.mp4`.
 
-### Изменения кода
-- `media_hunter_bot/optimized_processor.py`: вынесен общий FFmpeg runner и добавлен `apply_watermark()`, который накладывает только watermark на уже уникализированное видео; uniqueness filter в этой стадии не используется.
-- `media_hunter_bot/process_cache.py`: количество enabled каналов определяется по пользователю из имени job work directory; для нескольких каналов создаётся и сохраняется `unique_base.mp4`, затем используются watermark-only variants.
-- `tests/test_process_cache.py`: добавлены проверки одного канала, frozen base для трёх каналов, возврата base без watermark и независимого compression cache entry.
+### Код
+- `media_hunter_bot/optimized_processor.py`: общий FFmpeg runner + `apply_watermark()` без uniqueness filter.
+- `media_hunter_bot/process_cache.py`: frozen base для нескольких каналов.
+- `tests/test_process_cache.py`: проверки exact-copy, frozen base, empty watermark и compression cache.
 - Commits:
-  - `6004e6e3f62754ab2f3098128941934e1d5b0e11` — add frozen unique base and watermark-only processing stage.
-  - `64e220e667f5d83202cbe5081c39f74ccfb0c6bb` — freeze unique base for multi-channel watermark variants.
-- CI после этих двух code commits автоматически запущен:
-  - run `33766411230` для `64e220e667f5d83202cbe5081c39f74ccfb0c6bb` — `in_progress` на момент записи;
-  - run `33766434785` для `aa248aa50e0ee61d69c129ded0a8cc08d658c9f7` (test commit) — `queued` на момент записи.
-- ⬜ Перед production deploy обязательно подтвердить green итог обоих/последнего актуального run.
-
-### Ожидаемое поведение в production
-Для 1 канала:
-`unique/process → private send → exact same file to channel`.
-
-Для 2–3 каналов:
-`source → UNIQUE_BASE_CREATE → unique_base.mp4 → user/channel watermark variants → sends`.
-
-Ожидаемые диагностические строки для multi-channel job:
-- `UNIQUE_BASE_CREATE`
-- `UNIQUE_BASE_READY`
-- один уникализирующий `PROCESS_*`
-- `WATERMARK_VARIANT_CREATE` для каждого отличающегося watermark
-- при повторном использовании того же профиля `WATERMARK_VARIANT_HIT`
-- отсутствие повторного uniqueness pass для channel #2/#3.
+  - `6004e6e3f62754ab2f3098128941934e1d5b0e11`
+  - `64e220e667f5d83202cbe5081c39f74ccfb0c6bb`
+  - `aa248aa50e0ee61d69c129ded0a8cc08d658c9f7`
+  - `e8007d3ad84c7a76f748bd4290704c782b4c0e6d` — documentation/frozen-base handoff.
+- ⬜ Важное замечание: текущий `apply_watermark()` для logo использует direct overlay и не проходит старый `wm_wizard` render pipeline; перед production нужно отдельно проверить размер/opacity logo для multi-channel режима.
 
 ## YouTube playlists — 2026-09-03
-- Плейлист не должен занимать worker всеми видео сразу.
-- `media_hunter_bot/playlist_support.py` подключается после импорта handlers из root `main.py`.
-- Плейлист — одна логическая задача; следующий элемент ставится после завершения предыдущего.
+- Плейлист — одна логическая задача; следующий элемент ставится только после завершения предыдущего.
 - Каждый элемент: скачать → уникализировать → watermark → отправить/autopost → следующий элемент.
 - Continuation priority = `2`; обычный Free = `1`; обычный Premium = `0`.
 - Premium не прерывает уже выполняющийся FFmpeg/yt-dlp, но после освобождения worker идёт раньше Free и playlist continuation.
-- Free: максимум 20 видео за playlist request и 3 playlist requests в календарный месяц.
-- Premium: максимум 40 видео за playlist request, без месячного лимита playlist requests.
-- Playlist video source limit: 80 MB; если размер известен заранее и >80 MB, загрузка не начинается; если неизвестен, проверяется после загрузки до FFmpeg.
+- Free: максимум 20 видео/request и 3 playlist requests в календарный месяц.
+- Premium: максимум 40 видео/request, без месячного лимита playlist requests.
+- Playlist video source limit: 80 MB; при известном размере >80 MB загрузка не начинается; неизвестный размер проверяется после загрузки до FFmpeg.
 - Обычные URL и `Моё видео` не получили новый 80 MB лимит.
-- Состояние continuation в памяти; restart/cancel останавливает продолжение.
+- Continuation state в памяти; restart/cancel останавливает продолжение.
 - ⬜ Production smoke: playlist 5–20 видео, Premium 40, fair interleaving, >80 MB guard, free monthly quota.
 
 ## Тарифы / каналы
@@ -149,25 +140,25 @@
 
 ## Важная история с handlers.py
 - ❌ Неполная массовая замена `handlers.py` ранее вырезала функциональность и вызвала CI ошибки.
-- ✅ Полный рабочий `handlers.py` восстановлен из точки `6842889`.
+- ✅ Рабочий `handlers.py` восстановлен из точки `6842889`.
 - Restore commit: `a559a8dc79447a0e65a04009226b9d0123b5bc78`.
 - Не делать широких rewrite `handlers.py` без необходимости.
 
 ## Tests / CI
 - `.github/workflows/tests.yml`: install dependencies → compile → `python -m unittest discover -s tests -v`.
-- Последний подтверждённый зелёный CI до exact-copy тестового изменения: run `33762724035` для journal/hardening commit `ae7e28244450f71793f0dc9b2158de33face08af`.
-- Run `33764835219` на `8bd812c6ccb2559966b0481627a2d24ff2ff596d` — ❌ regression test, потому что старый тест ожидал разные outputs для разных watermark; compile и остальные 46 тестов прошли.
-- Run `33765082009` на `a90d72b3bc7a3a6474fe27d45cef165d130316e3` — ⏳ проверялся; итог должен быть подтверждён после завершения.
-- Exact-copy code commit: `95ea3fcf8903ac29489a06816512b21b6d9e33fe`.
-- Multi-channel frozen-base code/test commits: `6004e6e3f62754ab2f3098128941934e1d5b0e11`, `64e220e667f5d83202cbe5081c39f74ccfb0c6bb`, `aa248aa50e0ee61d69c129ded0a8cc08d658c9f7`.
+- Последний подтверждённый green до exact-copy: run `33762724035` для `ae7e28244450f71793f0dc9b2158de33face08af`.
+- Run `33764835219` на `8bd812c6ccb2559966b0481627a2d24ff2ff596d` — ❌ regression из-за старого ожидания разных outputs для разных watermark; compile и остальные тесты прошли.
+- Run `33765082009` на `a90d72b3bc7a3a6474fe27d45cef165d130316e3` — ✅ green.
+- Latest legacy-cleanup runs: `33775146383` — ✅; `33775162559` — в процессе/финализация на момент записи.
 
-## Handoff / ближайшие действия
-1. ⬜ Дождаться/проверить CI на `64e220e667f5d83202cbe5081c39f74ccfb0c6bb` и `aa248aa50e0ee61d69c129ded0a8cc08d658c9f7`.
-2. ⬜ После зелёного CI проверить branch head.
-3. ⬜ Deploy branch head на VPS и restart `media-hunter.service`.
-4. ⬜ Тест с 1 enabled channel: пользователь и канал должны получить один и тот же готовый файл без второго processing.
-5. ⬜ Тест с 2 channels и разными watermark: одна `UNIQUE_BASE_CREATE`, затем отдельные variants без повторной uniqueness.
-6. ⬜ Проверить случай 3 channels.
-7. ⬜ Проверить `Моё видео`, YouTube, PNG logo и video+logo.
-8. ⬜ Проверить playlist и тарифные лимиты.
-9. 🔐 Перевыпустить Bot Token через BotFather, если ещё не сделано.
+## Handoff / текущий статус
+1. Branch: `Media_hanter-v3-security`.
+2. Latest code HEAD after legacy-watermark fix: `8d9d4712bfcb6714cdfdfaa224bc85d78cbf4aa0` before this journal-only commit; journal commit follows it.
+3. Production deploy is ⬜ until VPS is updated and smoke-tested.
+4. After deploy, restart `media-hunter.service`.
+5. First smoke: send a <=100 MB video with no configured watermark; verify no `Мой канал` appears.
+6. Second smoke: configure a real text watermark and verify it appears only after explicit configuration.
+7. Third smoke: test autopost and inspect logs for one processing pass in 1-channel mode.
+8. Multi-channel smoke: verify `UNIQUE_BASE_CREATE` once and channel variants without repeated uniqueness.
+9. Playlist smoke remains ⬜.
+10. Never record bot tokens or `.env` contents in this journal.
