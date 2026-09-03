@@ -1,4 +1,4 @@
-""""What I can do" screen for new Media Hunter users."""
+"""What I can do screen for new Media Hunter users."""
 from __future__ import annotations
 
 from aiogram import F
