@@ -14,9 +14,11 @@ from media_hunter_bot.handlers import main
 from media_hunter_bot import playlist_support
 from media_hunter_bot import handlers as _handlers
 from media_hunter_bot import about as _about
+from media_hunter_bot import ux_fixes as _ux_fixes
 
 playlist_support.patch_engine(_handlers.Engine, _handlers)
 _handlers.menu = _about.register_about(_handlers.router, _handlers.menu)
+_ux_fixes.patch_router(_handlers.router)
 
 
 if __name__ == "__main__":
