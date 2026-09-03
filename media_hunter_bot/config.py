@@ -44,10 +44,17 @@ MAX_WATERMARK_MB = int(os.getenv("MAX_WATERMARK_MB", "5"))
 MAX_WATERMARK_PX = int(os.getenv("MAX_WATERMARK_PX", "2000"))
 
 MAX_CONCURRENT = max(1, int(os.getenv("MAX_CONCURRENT", "1")))
-MAX_PLAYLIST_ITEMS = max(1, int(os.getenv("MAX_PLAYLIST_ITEMS", "50")))
+MAX_PLAYLIST_ITEMS = max(1, int(os.getenv("MAX_PLAYLIST_ITEMS", "40")))
 CLEANER_AGE_HOURS = max(1, int(os.getenv("CLEANER_AGE_HOURS", "12")))
 MAX_QUEUE_SIZE = max(1, int(os.getenv("MAX_QUEUE_SIZE", "100")))
 MAX_USER_QUEUE = max(1, int(os.getenv("MAX_USER_QUEUE", "10")))
+
+# Subscription policy.
+FREE_MAX_CHANNELS = 1
+PREMIUM_MAX_CHANNELS = 3
+FREE_PLAYLIST_MAX_VIDEOS = 20
+PREMIUM_PLAYLIST_MAX_VIDEOS = 40
+FREE_PLAYLISTS_PER_MONTH = 3
 
 if not 1 <= SOFT_UNIQUE_SIZE_MB <= MAX_UNIQUE_SIZE_MB:
     raise ValueError("SOFT_UNIQUE_SIZE_MB must be between 1 and MAX_UNIQUE_SIZE_MB")
