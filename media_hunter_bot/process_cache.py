@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Callable
 
 
+logger = logging.getLogger("media_hunter_bot.process_cache")
 _MAX_ENTRIES = 256
 _cache: dict[tuple[str, str, bool, bool, str], Path] = {}
 
@@ -24,8 +26,10 @@ def cached_process_media(processor: Callable[..., Path], source: Path, work: Pat
     key = (str(source.resolve()), str(work.resolve()), audio_only, compress, _watermark_key(watermark))
     cached = _cache.get(key)
     if cached is not None and cached.exists():
+        logger.info("PROCESS_CACHE_HIT work=%s audio_only=%s compress=%s", work, audio_only, compress)
         return cached
 
+    logger.info("PROCESS_CACHE_MISS work=%s audio_only=%s compress=%s", work, audio_only, compress)
     result = processor(
         source,
         work,
