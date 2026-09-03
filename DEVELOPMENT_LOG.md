@@ -167,7 +167,8 @@
 - Run `33764835219` на `8bd812c6ccb2559966b0481627a2d24ff2ff596d` — ❌ regression из-за старого ожидания разных outputs для разных watermark; compile и остальные тесты прошли.
 - Run `33765082009` на `a90d72b3bc7a3a6474fe27d45cef165d130316e3` — ✅ green.
 - Latest legacy-cleanup runs: `33775146383` — ✅; `33775162559` — compile и regression tests завершены успешно.
-- ⬜ Новый CI для first-channel watermark: должен подтвердить `e1d50d50...` + `73375997...`.
+- Latest confirmed full green before explicit photo-handler rework: run `33781401170` на `a0f09948...` — ✅ compile + regression tests.
+- New explicit photo-handler commit `26451a2c57fdee09cc0aad3e4a4f74911980b2c0` is pending CI confirmation.
 
 ## Logo upload fix — 2026-09-03
 ### Причина
@@ -175,35 +176,32 @@
 - В `wm_wizard.py` исходный wizard имел обработчик только `LogoStates.upload, F.document`.
 - Обычная фотография из галереи Telegram приходит как `Message.photo`, поэтому такой аплоад не попадал ни в один handler и выглядел как «тихое игнорирование» без ошибки.
 
-### Исправление
-- Добавлен `media_hunter_bot/logo_upload_fix.py` с middleware для `Message.photo` в состоянии `LogoStates.upload`.
-- Берётся максимальный размер фотографии, файл скачивается через Bot API, временно сохраняется в `LOGO_DIR`, затем через FFmpeg преобразуется в PNG.
-- После `validate_logo()` состояние переводится в `LogoStates.settings` и пользователю показывается экран настроек логотипа.
-- Ошибки загрузки/валидации теперь возвращаются пользователю, а существующий `F.document` путь сохранён.
+### Первое исправление
+- Добавлен `media_hunter_bot/logo_upload_fix.py` с обработкой `Message.photo` и конвертацией JPEG → PNG через FFmpeg.
 - `main.py` регистрирует patch через `_logo_upload_fix.patch_router(_handlers.router)`.
-- Исправлена асинхронная ошибка с `Path.mkdir()`: синхронный вызов вынесен в `asyncio.to_thread()`.
-- Regression test сначала был исправлен после неудачного patch `PosixPath.mkdir`, затем переведён на `TemporaryDirectory()` и проверку фактического PNG.
-- Commits:
-  - `6f2c5e46b9f25dd70400abf0f0669b9fdd7c58a2` — initial photo upload middleware.
-  - `a3ff80de87bea385af8344f7e4e0f0a1b5cac8fe` — router registration in root `main.py`.
-  - `0be30a6149f010d08b2840b15c21f831512d0a16` — async-safe `LOGO_DIR.mkdir()`.
-  - `be42b52dcf7114e56a9280c5dbedda46ee7b0be6` — first regression test correction.
-  - `8ccd1a08e5af7a2ab9f078a9ac5a41149c96a44a` — final test using temporary directory.
-- CI run `33780029603` на `be42b52...` — ❌ regression test failure; compile/setup passed.
-- CI run `33780698086` на `8ccd1a08...` — ✅ success; Compile ✅, Regression tests ✅, job `tests` completed successfully.
+- Исправлена асинхронная ошибка с `Path.mkdir()` через `asyncio.to_thread()`.
+- Regression test использует `TemporaryDirectory()` и проверяет фактический PNG, переход FSM в `LogoStates.settings` и ответ пользователю.
+- CI run `33780698086` на `8ccd1a08...` — ✅ success; Compile ✅, Regression tests ✅.
+
+### Повторная диагностика после production smoke
+- После деплоя предыдущей версии пользователь снова получил полное молчание при отправке обычного фото.
+- Чтобы исключить зависимость от порядка middleware, `logo_upload_fix.py` теперь регистрирует **явный router message handler** `LogoStates.upload + F.photo`, вместо middleware-only interception.
+- Старый `F.document` handler в `wm_wizard.py` не удалён.
+- Новый commit: `26451a2c57fdee09cc0aad3e4a4f74911980b2c0`.
+- ⬜ Нужен CI и production smoke именно для этой версии.
 
 ## Handoff / текущий статус
 1. Branch: `Media_hanter-v3-security`.
-2. Latest branch head: `8ccd1a08e5af7a2ab9f078a9ac5a41149c96a44a`.
-3. Latest CI: run `33780698086` — ✅ green.
-4. Logo photo upload fix is committed and CI-validated.
-5. Production deploy is ⬜ until VPS is updated and smoke-tested.
+2. Latest branch head: `26451a2c57fdee09cc0aad3e4a4f74911980b2c0`.
+3. Latest fully green CI: run `33781401170` на `a0f09948...` — ✅.
+4. New explicit photo-handler commit `26451a2c...` awaits CI confirmation.
+5. Production deploy of the explicit handler is ⬜ until CI passes.
 6. After deploy, restart `media-hunter.service`.
-7. First smoke: send a <=100 MB video with one enabled channel whose watermark is configured; verify bot result and channel copy show the same watermark.
-8. Second smoke: verify an old `Мой канал` watermark is not applied.
-9. Third smoke: verify 1-channel autopost uses exact same processed file / no second FFmpeg.
-10. Multi-channel smoke: verify `UNIQUE_BASE_CREATE` once and channel variants without repeated uniqueness.
-11. Logo smoke: open watermark → logo → send a normal gallery photo (not document) → settings screen must appear → save → process short video → verify logo.
+7. First smoke: open watermark → logo → send a normal gallery photo (not document) → settings screen must appear.
+8. Then save logo and process a short video; verify logo appears on output.
+9. Verify old `Мой канал` watermark is not applied.
+10. Verify 1-channel autopost uses exact same processed file / no second FFmpeg.
+11. Multi-channel smoke: verify `UNIQUE_BASE_CREATE` once and channel variants without repeated uniqueness.
 12. Playlist smoke remains ⬜.
 13. Premium/free channel-limit smoke remains ⬜.
 14. Never record bot tokens or `.env` contents in this journal.
