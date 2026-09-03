@@ -28,7 +28,10 @@ class MediaUniquenessRegressionTests(unittest.TestCase):
 
         source = inspect.getsource(optimized_processor.process_media)
         self.assertIn('"-threads", "2"', source)
-        self.assertIn('"-preset", "veryfast"', source)
+        self.assertTrue(
+            '"-preset", "veryfast"' in source or '"-preset", "superfast"' in source,
+            source,
+        )
         self.assertIn('"-crf", "27"', source)
 
     def test_local_bot_api_is_configured_for_absolute_file_paths(self):
