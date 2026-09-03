@@ -87,7 +87,17 @@ def _filtered_menu(menu_fn, uid):
 
 
 def _patched_register_wm_wizard(router, menu_fn):
-    return _original_register_wm_wizard(router, lambda uid: _filtered_menu(menu_fn, uid))
+    result = _original_register_wm_wizard(router, lambda uid: _filtered_menu(menu_fn, uid))
+    # Register the photo handler at the same point as the watermark wizard so
+    # it is present even when the service imports handlers.py directly instead
+    # of going through the repository root main.py bootstrap.
+    try:
+        from .logo_upload_fix import patch_router as _patch_logo_router
+        _patch_logo_router(router)
+    except Exception:
+        # Keep startup resilient; normal document uploads remain available.
+        pass
+    return result
 
 
 async def _patched_middleware_call(self, handler, event, data):
