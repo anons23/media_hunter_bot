@@ -43,8 +43,6 @@ def process_media(
             cmd += ["-i", str(logo)]
         cmd += [
             "-c:v", "libx264",
-            # Two encoder threads give predictable CPU use while avoiding the
-            # very slow single-thread behaviour seen on the VPS.
             "-threads", "2",
             "-c:a", "aac",
             "-b:a", "128k",
@@ -52,7 +50,10 @@ def process_media(
             "-map_metadata", "-1",
             "-metadata", "comment=media_hunter",
         ]
-        cmd += ["-crf", "30", "-preset", "veryfast"] if compress else ["-crf", "27", "-preset", "veryfast"]
+        # The VPS is CPU-bound on watermark/autopost re-encodes. superfast
+        # substantially reduces wall-clock time while uniqueness remains
+        # active through the filter above. Compression keeps a separate CRF.
+        cmd += ["-crf", "30", "-preset", "superfast"] if compress else ["-crf", "27", "-preset", "superfast"]
         base_vf = _unique_video_filters()
         if logo:
             fc = (
