@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,29 +21,33 @@ class TestLogoUploadFix(unittest.IsolatedAsyncioTestCase):
         state.update_data = AsyncMock()
         state.set_state = AsyncMock()
 
-        async def fake_download(file_path, destination):
-            Path(destination).write_bytes(b"jpeg")
+        with tempfile.TemporaryDirectory() as tmp:
+            logo_dir = Path(tmp)
 
-        bot.download_file = AsyncMock(side_effect=fake_download)
+            async def fake_download(file_path, destination):
+                Path(destination).write_bytes(b"jpeg")
 
-        with patch("media_hunter_bot.logo_upload_fix.LOGO_DIR.mkdir") as mkdir, \
-             patch.object(logo_upload_fix.subprocess, "run") as run, \
-             patch.object(logo_upload_fix, "validate_logo", return_value=(True, "")):
-            def fake_run(*args, **kwargs):
-                output = Path(args[0][-1])
-                output.write_bytes(b"png")
-                result = MagicMock()
-                result.returncode = 0
-                return result
-            run.side_effect = fake_run
+            bot.download_file = AsyncMock(side_effect=fake_download)
 
-            handled = await logo_upload_fix._handle_photo(message, bot, state)
+            with patch.object(logo_upload_fix, "LOGO_DIR", logo_dir), \
+                 patch.object(logo_upload_fix.subprocess, "run") as run, \
+                 patch.object(logo_upload_fix, "validate_logo", return_value=(True, "")):
+                def fake_run(*args, **kwargs):
+                    output = Path(args[0][-1])
+                    output.write_bytes(b"png")
+                    result = MagicMock()
+                    result.returncode = 0
+                    return result
+                run.side_effect = fake_run
 
-        self.assertTrue(handled)
-        mkdir.assert_called_once_with(parents=True, exist_ok=True)
-        state.set_state.assert_awaited_once_with(logo_upload_fix.LogoStates.settings)
-        self.assertTrue(state.update_data.await_count >= 1)
-        message.answer.assert_awaited_once()
+                handled = await logo_upload_fix._handle_photo(message, bot, state)
+
+            self.assertTrue(handled)
+            saved = list(logo_dir.glob("*.png"))
+            self.assertEqual(len(saved), 1)
+            state.set_state.assert_awaited_once_with(logo_upload_fix.LogoStates.settings)
+            self.assertTrue(state.update_data.await_count >= 1)
+            message.answer.assert_awaited_once()
 
     async def test_non_photo_is_not_handled(self):
         message = MagicMock()
