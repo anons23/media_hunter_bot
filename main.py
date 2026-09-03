@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 load_dotenv(ROOT / ".env")
 
-from media_hunter_bot.config import ensure_directories, validate
+from media_hunter_bot.config import DB_PATH, ensure_directories, validate
 from media_hunter_bot.handlers import main
 from media_hunter_bot import playlist_support
 from media_hunter_bot import handlers as _handlers
@@ -38,5 +38,5 @@ _ux_fixes.patch_router(_handlers.router)
 if __name__ == "__main__":
     ensure_directories()
     validate()
-    _legacy_watermark_guard.cleanup_legacy_watermark(__import__("media_hunter_bot.config", fromlist=["DB_PATH"]).DB_PATH)
+    _legacy_watermark_guard.cleanup_legacy_watermark(DB_PATH)
     asyncio.run(main())
