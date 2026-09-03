@@ -147,50 +147,42 @@
 - ✅ Premium сохраняет текущий верхний предел `MAX_PLAYLIST_ITEMS` (по умолчанию 50), но также обрабатывает видео по одному и не монополизирует worker.
 - ✅ Перед постановкой playlist-запроса бот получает общее количество элементов через `playlist_count`, а пользователю отправляется сообщение вида: `📚 Найдено 80 видео... Бесплатный тариф: за раз обрабатываются только первые 20...`.
 - ✅ Для playlist-видео введён отдельный исходный лимит **80 MB**. Если yt-dlp заранее сообщает известный `filesize/filesize_approx` выше 80 MB, загрузка такого видео не начинается. Если размер заранее неизвестен, после загрузки размер проверяется и файл не передаётся в обычную обработку/FFmpeg.
-- ⚠️ Для HLS/DASH и других форматов yt-dlp может не знать точный размер до загрузки; поэтому пост-проверка после скачивания остаётся обязательной. Документация yt-dlp также отмечает ограничения `--max-filesize` для manifest-потоков. citeturn3search0turn3search2
+- ⚠️ Для HLS/DASH и других форматов yt-dlp может не знать точный размер до загрузки; поэтому пост-проверка после скачивания остаётся обязательной.
 - ✅ Обычные одиночные URL и `Моё видео` не получили новый 80 MB playlist-лимит.
-- Commit: `43e29244c081c2ae16ef96d20a76e992d4e754c3` — initial playlist support.
-- Commit: `4e45567f54c9d1a85f70c253d231f321ea01a4d1` — refined scheduler/limits/guards.
-- Commit: `2a61db1862c9d8b7c4d7952afc80e13b43cd25f3` — wire support into root startup.
-- Commit: `01846cdfa2dd3a5843cd04d7e1108cb3fffc8685` — playlist policy regression tests.
-- Commit: `2863e6627d63eb01616273abb1e746e6fef2a436` — include playlist module in CI compile step.
-- ⬜ CI для playlist changes — после push пока не возвращён workflow result через доступный GitHub Actions endpoint.
+- Commits: `43e29244...`, `4e45567f...`, `2a61db18...`, `01846cdf...`, `2863e662...`.
+- CI workflow `33743644530` на commit `f8a15408...` — ✅ success (compile + regression tests).
 - ⬜ Production smoke test: playlist 5–20 видео.
 - ⬜ Production проверить, что обычная задача пользователя/другого пользователя проходит между playlist-видео.
 - ⬜ Production проверить отказ/пропуск playlist-видео >80 MB без FFmpeg.
 - ⬜ Production проверить месячный лимит 3 playlist-запроса free-пользователя.
 
+## Что я умею — 2026-09-03
+- Пользователь предложил добавить в конец главного меню кнопку `ℹ️ Что я умею`, чтобы новый пользователь сразу видел возможности бота и различия Free/Premium.
+- ✅ Добавлен отдельный `media_hunter_bot/about.py` с единым информационным экраном.
+- ✅ Кнопка добавляется последней строкой главного меню и открывает экран с описанием скачивания, плейлистов, уникализации, text/logo watermark, своего видео, автопостинга, форматов, Free-лимитов и Premium.
+- ✅ Экран содержит актуальные playlist-ограничения: 20 первых видео и 3 playlist-запроса/месяц для Free; до 50 видео для Premium; playlist-видео до 80 МБ.
+- Commits: `b1efa423...`, `2e1295a4...`, `99bfdce8...`, `32dd48ce...`.
+- ⬜ CI для текущего head после добавления экрана.
+- ⬜ Production проверить отображение кнопки и возврат назад.
+
 ## Tests / CI
 - `.github/workflows/tests.yml`: install dependencies → compile → `unittest discover`.
-- Run `33648480341` — ✅ success.
-- Run `33651556824` — ✅ success.
-- Run `33653931005` — ✅ success.
-- Run `33655342998` на `046fbb3e...` — ✅ success.
-- Run `33655394965` на `bc8f2e37...` — Local Bot API regression.
-- Run `33655799262` на `1fab8a9a...` — ✅ success.
-- ⬜ CI для commits `d82cb3c4...`, `7d76f3cb...`.
-- ⬜ CI для `59c20fb4...`.
-- ⬜ CI для playlist commits `43e29244...` → `2863e662...`.
+- Run `33743644530` на `f8a15408...` — ✅ success.
+- ⬜ CI для текущего head после `ℹ️ Что я умею`.
 
 ## Последние commits
+- `32dd48ce6f6c4b425700a09370317b532456d705` — Add regression tests for capabilities screen.
+- `99bfdce872beebd2cd16896a72aa29ec4a89ec0e` — Register bot capabilities screen.
+- `2e1295a4d8abe1d74caa564b33ab2984e518d23b` — Fix about module docstring.
+- `b1efa423c348185ea8c12895a58ce29ac6a02d73` — Add bot capabilities screen.
+- `f8a15408ce25e57bc04813616f0f871bfcb8b471` — Document YouTube playlist limits and fair scheduler.
 - `2863e6627d63eb01616273abb1e746e6fef2a436` — Include playlist support in CI compile check.
 - `01846cdfa2dd3a5843cd04d7e1108cb3fffc8685` — Add playlist policy regression tests.
 - `2a61db1862c9d8b7c4d7952afc80e13b43cd25f3` — Wire fair playlist scheduler into bot startup.
-- `172eb87cd23e9a294c073b7adf5437395911faed` — Limit playlist probing to applicable tier.
-- `4e45567f54c9d1a85f70c253d231f321ea01a4d1` — Refine fair playlist limits and guards.
-- `43e29244c081c2ae16ef96d20a76e992d4e754c3` — Add fair bounded playlist support.
 - `59c20fb4ae8183e210c5521c1172640d5f1300a5` — Clear legacy Telegram command menu.
-- `7d76f3cb03917e0a14d8704189151f2ca267c1ae` — Test process wrapper runtime dependencies.
-- `d82cb3c4c2d45f396831ccb9cd2ba16cb06174c9` — Fix process wrapper runtime globals.
-- `c190963d167c633acd9c11956664ae1a7898bf9d` — Add regression test for process wrapper arguments.
-- `eac7b433970f4136ecbd53b5edf591b1b9dfb989` — Fix process_media wrapper positional arguments.
-- `a26db9ec361e2fa9bd58be3ccd069e9894fd7838` — Avoid duplicate media processing for identical watermark profiles.
-- `2c8dd1ca4a20ead1f32a826fe0e50edc1b4f69c5` — Reuse identical processing results during autopost.
-- `dacd9e387a65377e1e8bf2933155d4f2613fb8ab` — Test reuse of identical processing results.
-- `046fbb3efc38873deb07df28ca07249b96a66ac3` — Fix Local Bot API file downloads.
 
 ## Handoff
-1. ⬜ CI для текущего head `2863e662...` / playlist changes.
+1. ⬜ CI для текущего head после `ℹ️ Что я умею`.
 2. ⬜ Deploy branch head to VPS и restart `media-hunter.service`.
 3. ⬜ Проверить мобильное меню Telegram — старые команды должны исчезнуть.
 4. ⬜ Проверить `Моё видео`.
@@ -201,5 +193,6 @@
 9. ⬜ Проверить playlist 5–20 видео и fair interleaving с обычными задачами.
 10. ⬜ Проверить playlist >80 MB guard.
 11. ⬜ Проверить free playlist quota: 3 запроса/месяц, 20 видео/запрос.
-12. ⬜ Улучшить stderr logging FFmpeg.
-13. 🔐 Перевыпустить Bot Token через BotFather из-за раскрытия в логах.
+12. ⬜ Проверить `ℹ️ Что я умею` и возврат в главное меню.
+13. ⬜ Улучшить stderr logging FFmpeg.
+14. 🔐 Перевыпустить Bot Token через BotFather из-за раскрытия в логах.
