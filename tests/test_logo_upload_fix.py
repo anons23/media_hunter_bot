@@ -25,7 +25,7 @@ class TestLogoUploadFix(unittest.IsolatedAsyncioTestCase):
 
         bot.download_file = AsyncMock(side_effect=fake_download)
 
-        with patch.object(logo_upload_fix.LOGO_DIR, "mkdir") as mkdir, \
+        with patch("media_hunter_bot.logo_upload_fix.LOGO_DIR.mkdir") as mkdir, \
              patch.object(logo_upload_fix.subprocess, "run") as run, \
              patch.object(logo_upload_fix, "validate_logo", return_value=(True, "")):
             def fake_run(*args, **kwargs):
