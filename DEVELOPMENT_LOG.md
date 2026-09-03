@@ -192,14 +192,26 @@
 - ⬜ Production smoke test `Моё видео` / logo / YouTube.
 - ⬜ По pipeline-логам определить источник задержки доставки видео.
 
+## FFmpeg autopost performance + production error — 2026-09-03
+- Production pipeline показал две последовательные обработки примерно по 70 секунд для private output и channel autopost output. Это ожидаемо, если профили watermark различаются; одинаковые профили должны использовать `process_cache.py` и не кодироваться второй раз.
+- Для ускорения повторных watermark/autopost encode в `media_hunter_bot/optimized_processor.py` preset изменён с `veryfast` на `superfast`, при этом `-threads 2`, CRF и обязательный лёгкий uniqueness filter сохранены. Требование уникализации для видео `<=100 MB` не ослаблено.
+- Production smoke test после этой версии показал отдельный FFmpeg failure через ~2.8 секунды: `Error writing trailer: No such file or directory`. Это указывает на проблему с доступностью output path/work directory во время записи, а не на медленный encode.
+- ✅ `optimized_processor.process_media()` теперь defensively выполняет `work_dir.mkdir(parents=True, exist_ok=True)` перед построением/запуском FFmpeg.
+- CI run `33760885309` на `db91e6f84bc365d14b3dad1cf1b60bdfdc8965a6` — ❌ только regression test из-за старого ожидания `veryfast`; compile и остальные 44 теста прошли. Тест обновлён, чтобы принимать `veryfast` или `superfast`.
+- Fix commits: `0d480694d9e09ebbc1c10e38923e81965b09a984` (test), `1ee216ee6bf3615c1d6ad9c47a53d13e21409052` (processing directory hardening).
+- ⬜ CI после этих fixes.
+- ⬜ Production повторно проверить обычное видео.
+- ⬜ Production повторно проверить autopost и количество `PROCESS_*`.
+- ⬜ Production проверить video+logo.
+
 ## Tests / CI
 - `.github/workflows/tests.yml`: install dependencies → compile → `unittest discover`.
-- Run `33755314322` на `4ab47c3fb3900d63fa12e2ff2b47f6056d96445d` — ✅ success.
-- Run `33756818297` на `db4cb1aea836df48daa133e21835be98f4deb60c` — ⏳ был в процессе на момент записи.
-- Run `33756834610` на `52de85b2ea25de59aa6e99bdbbeef23bf265b6bc` — ⏳ был в очереди на момент записи.
+- Run `33755314322` на `4ab47c3fb3900d63deb40e45d23284fbd74ec999d` — ✅ success.
+- Run `33760885309` на `db91e6f84bc365d14b3dad1cf1b60bdfdc8965a6` — ❌ regression test `test_video_encoder_is_cpu_bounded_and_fast_preset`; причина только в том, что тест ожидал `veryfast`, а код уже использовал `superfast`.
+- ⬜ Новый CI для commits `0d480694d9e09ebbc1c10e38923e81965b09a984` и `1ee216ee6bf3615c1d6ad9c47a53d13e21409052`.
 
 ## Handoff
-1. ⬜ Дождаться зелёного CI для `52de85b2ea25de59aa6e99bdbbeef23bf265b6bc`.
+1. ⬜ Дождаться зелёного CI для текущего head.
 2. ⬜ Deploy branch head to VPS и restart `media-hunter.service`.
 3. ⬜ Проверить автопостинг: включить канал и отправить тестовое видео.
 4. ⬜ Проверить `Моё видео`.
