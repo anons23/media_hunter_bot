@@ -28,6 +28,11 @@ def process_media(
     compress: bool,
     register: Callable[[Any], None],
 ) -> Path:
+    # Be defensive: callers normally create the work directory, but the
+    # processing layer must never fail merely because it disappeared between
+    # queueing and FFmpeg startup.
+    work_dir.mkdir(parents=True, exist_ok=True)
+
     if audio_only:
         output = work_dir / "output.mp3"
         cmd = [
