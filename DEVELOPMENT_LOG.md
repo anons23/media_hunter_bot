@@ -130,9 +130,9 @@
 - Для 1-channel режима cache сохраняет exact-copy: второй вызов возвращает тот же файл без второго FFmpeg.
 - Для multi-channel режима frozen unique base сохраняется, а watermark variants создаются из неё; uniqueness повторно не запускается.
 - Добавлены regression tests на реальный first-channel watermark и на multi-channel private result.
-- Code commit: `e1d50d50ce3d19bf5643df502053590564fd5185`.
-- Test commit: `733759976b88a34526acdaf4a21791f5a9965128`.
-- ⬜ Production: обновить VPS, отправить видео с настроенным watermark первого канала и проверить, что в боте и канале виден один и тот же watermark; проверить отсутствие `Мой канал`.
+- Actual code commit: `3d7df138a9603f68319fa4a68097f91ece401193`.
+- Actual test commit: `1694e97ddd033e47c15cd85d78b2aeaf87e74753`.
+- ⬜ CI для `1694e97...` ранее не был подтверждён через commit-scoped endpoint; перед production ориентируемся на текущий green workflow после последующих commits.
 
 ## YouTube playlists — 2026-09-03
 - Плейлист — одна логическая задача; следующий элемент ставится только после завершения предыдущего.
@@ -140,7 +140,7 @@
 - Continuation priority = `2`; обычный Free = `1`; обычный Premium = `0`.
 - Premium не прерывает уже выполняющийся FFmpeg/yt-dlp, но после освобождения worker идёт раньше Free и playlist continuation.
 - Free: максимум 20 видео/request и 3 playlist requests в календарный месяц.
-- Premium: максимум 40 видео/request, без месячного лимита playlist requests.
+- Premium: максимум 40 видео/request, без monthly playlist-request limit.
 - Playlist video source limit: 80 MB; при известном размере >80 MB загрузка не начинается; неизвестный размер проверяется после загрузки до FFmpeg.
 - Обычные URL и `Моё видео` не получили новый 80 MB лимит.
 - Continuation state в памяти; restart/cancel останавливает продолжение.
@@ -169,14 +169,41 @@
 - Latest legacy-cleanup runs: `33775146383` — ✅; `33775162559` — compile и regression tests завершены успешно.
 - ⬜ Новый CI для first-channel watermark: должен подтвердить `e1d50d50...` + `73375997...`.
 
+## Logo upload fix — 2026-09-03
+### Причина
+- Пользователь обнаружил, что при загрузке логотипа бот вообще ничего не отвечал и логотип не сохранялся.
+- В `wm_wizard.py` исходный wizard имел обработчик только `LogoStates.upload, F.document`.
+- Обычная фотография из галереи Telegram приходит как `Message.photo`, поэтому такой аплоад не попадал ни в один handler и выглядел как «тихое игнорирование» без ошибки.
+
+### Исправление
+- Добавлен `media_hunter_bot/logo_upload_fix.py` с middleware для `Message.photo` в состоянии `LogoStates.upload`.
+- Берётся максимальный размер фотографии, файл скачивается через Bot API, временно сохраняется в `LOGO_DIR`, затем через FFmpeg преобразуется в PNG.
+- После `validate_logo()` состояние переводится в `LogoStates.settings` и пользователю показывается экран настроек логотипа.
+- Ошибки загрузки/валидации теперь возвращаются пользователю, а существующий `F.document` путь сохранён.
+- `main.py` регистрирует patch через `_logo_upload_fix.patch_router(_handlers.router)`.
+- Исправлена асинхронная ошибка с `Path.mkdir()`: синхронный вызов вынесен в `asyncio.to_thread()`.
+- Regression test сначала был исправлен после неудачного patch `PosixPath.mkdir`, затем переведён на `TemporaryDirectory()` и проверку фактического PNG.
+- Commits:
+  - `6f2c5e46b9f25dd70400abf0f0669b9fdd7c58a2` — initial photo upload middleware.
+  - `a3ff80de87bea385af8344f7e4e0f0a1b5cac8fe` — router registration in root `main.py`.
+  - `0be30a6149f010d08b2840b15c21f831512d0a16` — async-safe `LOGO_DIR.mkdir()`.
+  - `be42b52dcf7114e56a9280c5dbedda46ee7b0be6` — first regression test correction.
+  - `8ccd1a08e5af7a2ab9f078a9ac5a41149c96a44a` — final test using temporary directory.
+- CI run `33780029603` на `be42b52...` — ❌ regression test failure; compile/setup passed.
+- CI run `33780698086` на `8ccd1a08...` — ✅ success; Compile ✅, Regression tests ✅, job `tests` completed successfully.
+
 ## Handoff / текущий статус
 1. Branch: `Media_hanter-v3-security`.
-2. Latest code includes first-channel watermark exact-copy logic: `e1d50d50ce3d19bf5643df502053590564fd5185` + tests `733759976b88a34526acdaf4a21791f5a9965128`.
-3. Production deploy is ⬜ until VPS is updated and smoke-tested.
-4. After deploy, restart `media-hunter.service`.
-5. First smoke: send a <=100 MB video with one enabled channel whose watermark is configured; verify bot result and channel copy show the same watermark.
-6. Second smoke: verify an old `Мой канал` watermark is not applied.
-7. Third smoke: verify 1-channel autopost uses exact same processed file / no second FFmpeg.
-8. Multi-channel smoke: verify `UNIQUE_BASE_CREATE` once and channel variants without repeated uniqueness.
-9. Playlist smoke remains ⬜.
-10. Never record bot tokens or `.env` contents in this journal.
+2. Latest branch head: `8ccd1a08e5af7a2ab9f078a9ac5a41149c96a44a`.
+3. Latest CI: run `33780698086` — ✅ green.
+4. Logo photo upload fix is committed and CI-validated.
+5. Production deploy is ⬜ until VPS is updated and smoke-tested.
+6. After deploy, restart `media-hunter.service`.
+7. First smoke: send a <=100 MB video with one enabled channel whose watermark is configured; verify bot result and channel copy show the same watermark.
+8. Second smoke: verify an old `Мой канал` watermark is not applied.
+9. Third smoke: verify 1-channel autopost uses exact same processed file / no second FFmpeg.
+10. Multi-channel smoke: verify `UNIQUE_BASE_CREATE` once and channel variants without repeated uniqueness.
+11. Logo smoke: open watermark → logo → send a normal gallery photo (not document) → settings screen must appear → save → process short video → verify logo.
+12. Playlist smoke remains ⬜.
+13. Premium/free channel-limit smoke remains ⬜.
+14. Never record bot tokens or `.env` contents in this journal.
