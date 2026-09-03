@@ -139,6 +139,8 @@ class ProcessCacheTests(unittest.TestCase):
             processor_calls = []
             watermark_calls = []
             unique_base = work / "output.mp4"
+            first_channel = {"type": "text", "text": "CHANNEL-1"}
+            second_channel = {"type": "text", "text": "CHANNEL-2"}
 
             def processor(source_path, work_path, watermark, *, audio_only, compress, register):
                 processor_calls.append(dict(watermark))
@@ -151,26 +153,29 @@ class ProcessCacheTests(unittest.TestCase):
                 result.write_bytes(b"variant")
                 return result
 
-            with patch("media_hunter_bot.process_cache.db.list_channels", return_value=[{"enabled": 1}, {"enabled": 1}, {"enabled": 1}]), \
+            import json
+            rows = [
+                {"enabled": 1, "watermark": json.dumps(first_channel)},
+                {"enabled": 1, "watermark": json.dumps(second_channel)},
+                {"enabled": 1, "watermark": json.dumps({"type": "text", "text": "CHANNEL-3"})},
+            ]
+            with patch("media_hunter_bot.process_cache.db.list_channels", return_value=rows), \
                  patch("media_hunter_bot.process_cache.apply_watermark", side_effect=fake_apply):
                 first = cached_process_media(
-                    processor, source, work, {"type": "text", "text": "user"},
+                    processor, source, work, {"type": "text", "text": "private"},
                     audio_only=False, compress=False, register=None,
                 )
                 second = cached_process_media(
-                    processor, source, work, {"type": "text", "text": "channel-1"},
-                    audio_only=False, compress=False, register=None,
-                )
-                third = cached_process_media(
-                    processor, source, work, {"type": "image", "logo": "channel-2"},
+                    processor, source, work, second_channel,
                     audio_only=False, compress=False, register=None,
                 )
 
             self.assertEqual(processor_calls, [{}])
             self.assertEqual(first.name, "wm-1.mp4")
             self.assertEqual(second.name, "wm-2.mp4")
-            self.assertEqual(third.name, "wm-3.mp4")
-            self.assertEqual(len(watermark_calls), 3)
+            self.assertEqual(len(watermark_calls), 2)
+            self.assertEqual(watermark_calls[0][1], first_channel)
+            self.assertEqual(watermark_calls[1][1], second_channel)
             self.assertTrue(all(call[0].name == "unique_base.mp4" for call in watermark_calls))
 
     def test_empty_watermark_returns_frozen_base_for_multiple_channels(self):
