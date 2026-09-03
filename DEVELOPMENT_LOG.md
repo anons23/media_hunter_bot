@@ -142,8 +142,8 @@
 - ❌ Не нужно просто снимать `MAX_USER_QUEUE` и складывать 20–50 отдельных задач: при `MAX_CONCURRENT=1` это могло надолго занять единственный worker и заморозить обычные задачи.
 - ✅ Добавлен `media_hunter_bot/playlist_support.py`, подключаемый после импорта `handlers.py` из root `main.py`, без массовой переделки `handlers.py`.
 - ✅ Плейлист теперь считается **одной логической задачей пользователя** и не расходует лимит `MAX_USER_QUEUE` на каждый элемент. Продолжение добавляется в очередь только после завершения предыдущего видео.
-- ✅ После каждого элемента полностью выполняется обычный `_run_job()`: скачивание → уникализация → watermark → все enabled autopost-каналы → отправка. Только после завершения этого видео ставится следующий элемент плейлиста. Поэтому 40 видео с тремя разными channel watermark не держат все версии одновременно и дают общей очереди шанс работать между элементами.
-- ✅ Playlist continuation получает низший приоритет `2`, поэтому обычные бесплатные/премиум задачи могут проходить между видео плейлиста. Это снижает риск блокировки общей очереди при `MAX_CONCURRENT=1`.
+- ✅ После каждого элемента полностью выполняется обычный `_run_job()`: скачивание → уникализация → watermark → все enabled autopost-каналы → отправка. Только после завершения этого видео ставится следующий элемент плейлиста.
+- ✅ Playlist continuation получает низший приоритет `2`, поэтому обычные бесплатные/премиум задачи могут проходить между видео плейлиста.
 - ✅ Обычная Premium-задача имеет приоритет `0`, Free — `1`. Premium **не прерывает уже выполняющийся FFmpeg/yt-dlp job**, но после освобождения worker обычная Premium-задача выбирается раньше обычной Free-задачи и playlist continuation.
 - ✅ Бесплатный тариф: максимум **20 первых видео за один плейлист** и максимум **3 playlist-запроса в календарный месяц**. Лимит хранится в SQLite (`playlist_usage`), поэтому restart не сбрасывает месячный счётчик.
 - ✅ Premium: максимум **40 первых видео за один плейлист**, **без месячного лимита** на количество playlist-запросов.
@@ -155,7 +155,7 @@
 - CI workflow `33743644530` на commit `f8a15408...` — ✅ success (compile + regression tests).
 - ⬜ Production smoke test: playlist 5–20 видео.
 - ⬜ Production проверить Premium playlist 40 видео.
-- ⬜ Production проверить, что обычная задача пользователя/другого пользователя проходит между playlist-видео.
+- ⬜ Production проверить, что обычная задача проходит между playlist-видео.
 - ⬜ Production проверить отказ/пропуск playlist-видео >80 MB без FFmpeg.
 - ⬜ Production проверить месячный лимит 3 playlist-запроса free-пользователя.
 
@@ -166,8 +166,6 @@
   - Оба тарифа: уникализация, watermark и автопостинг.
   - Для playlist-видео обоих тарифов действует исходный лимит 80 MB на видео.
 - ✅ `media_hunter_bot/db.py` теперь реально ограничивает добавление каналов: Free — 1, Premium — 3. Повторное сохранение уже подключённого канала не блокируется лимитом.
-- ✅ `MAX_PLAYLIST_ITEMS` по умолчанию снижен с 50 до 40; Premium policy дополнительно ограничена `PREMIUM_PLAYLIST_MAX_VIDEOS=40`, Free — `FREE_PLAYLIST_MAX_VIDEOS=20`.
-- ⬜ CI после изменений тарифной матрицы.
 - ⬜ Production проверить Free: второй канал отклоняется.
 - ⬜ Production проверить Premium: третий канал добавляется, четвёртый отклоняется.
 
@@ -175,42 +173,44 @@
 - Пользователь предложил добавить в конец главного меню кнопку `ℹ️ Что я умею`, чтобы новый пользователь сразу видел возможности бота и различия Free/Premium.
 - ✅ Добавлен отдельный `media_hunter_bot/about.py` с единым информационным экраном.
 - ✅ Кнопка добавляется последней строкой главного меню и открывает экран с описанием скачивания, плейлистов, уникализации, text/logo watermark, своего видео, автопостинга, форматов, Free-лимитов и Premium.
-- ✅ Экран теперь отражает финальную матрицу: Free 1 канал / 20 видео / 3 playlist-запроса в месяц; Premium 3 канала / 40 видео / без месячного лимита; обработка плейлиста по одному видео; уникализация, watermark и автопостинг для обоих тарифов.
+- ✅ Экран отражает финальную матрицу: Free 1 канал / 20 видео / 3 playlist-запроса в месяц; Premium 3 канала / 40 видео / без месячного лимита; обработка плейлиста по одному видео; уникализация, watermark и автопостинг для обоих тарифов.
 - Commits: `b1efa423...`, `2e1295a4...`, `99bfdce8...`, `32dd48ce...`, `0ce1f520...`.
-- ⬜ CI для текущего head.
-- ⬜ Production проверить отображение кнопки и возврат назад.
+
+## Autopost toggle + pipeline diagnostics — 2026-09-03
+- По production-журналу 2026-09-02 обнаружен старый `NameError` `_cached_process_media`; текущий branch уже содержит fix, который удерживает runtime globals в `__init__.py`.
+- При ревизии актуального кода обнаружена отдельная ошибка в `_toggle_autopost`: использовался `await db.set_channel_enabled(...)` вместо async wrapper. Это могло ломать callback включения/выключения автопостинга.
+- ✅ Исправлено на `await db.aset_channel_enabled(...)`.
+- ✅ Добавлен regression test для этого вызова.
+- Наблюдавшаяся задержка около минуты не подтверждается как задержка polling: когда update уже поступает в aiogram, handler обычно завершается за десятки/сотни миллисекунд. Для точного разделения этапов добавлен runtime tracing.
+- ✅ `media_hunter_bot/runtime_diagnostics.py` логирует `QUEUE_ADD_START/DONE`, `JOB_START/DONE`, `TELEGRAM_GET_FILE_START/DONE` и `TELEGRAM_DOWNLOAD_START/DONE` с длительностью.
+- ✅ `main.py` подключает диагностику до polling.
+- Эти логи не меняют уникализацию, лимиты, приоритеты очереди или логику автопостинга.
+- Commits: `4c3337e757d7055614b5a50cc7dd2c036a470e4d`, `919ab602adacd6b0f2cba9176403fa9faa0dae9d`, `db4cb1aea836df48daa133e21835be98f4deb60c`, `52de85b2ea25de59aa6e99bdbbeef23bf265b6bc`.
+- ⬜ CI текущего head.
+- ⬜ Deploy текущего head на VPS.
+- ⬜ Production smoke test autopost.
+- ⬜ Production smoke test `Моё видео` / logo / YouTube.
+- ⬜ По pipeline-логам определить источник задержки доставки видео.
 
 ## Tests / CI
 - `.github/workflows/tests.yml`: install dependencies → compile → `unittest discover`.
-- Run `33743644530` на `f8a15408...` — ✅ success.
-- Run `33744043051` на промежуточном commit `32dd48ce...` — ❌ regression tests failed; compile step passed.
-- ⬜ CI для текущего head после финальной тарифной матрицы.
-
-## Последние commits
-- `4720d54d132aa43f58f424c2012c60c3d855623b` — Test final Free and Premium capabilities.
-- `0ce1f5205e00b06da99079c4fb7cefb989a3e334` — Document final Free and Premium capabilities.
-- `88148677f9b95235e3d1e298061d2d42a05b8162` — Restore DB API and enforce Free 1 Premium 3 channels.
-- `b6972f4813664453ccde9727d78b566bda27e765` — Apply fair playlist processing and Premium 40-video policy.
-- `86d9bb44ad3a141f0f157515a0392c739e3d938a` — Set final subscription and playlist limits.
-- `dfe05abffdbd4542e40db43fc72918f26bb42a3b` — Document capabilities screen.
-- `32dd48ce6f6c4b425700a09370317b532456d705` — Add regression tests for capabilities screen.
-- `99bfdce872beebd2cd16896a72aa29ec4a89ec0e` — Register bot capabilities screen.
-- `59c20fb4ae8183e210c5521c1172640d5f1300a5` — Clear legacy Telegram command menu.
+- Run `33755314322` на `4ab47c3fb3900d63fa12e2ff2b47f6056d96445d` — ✅ success.
+- Run `33756818297` на `db4cb1aea836df48daa133e21835be98f4deb60c` — ⏳ был в процессе на момент записи.
+- Run `33756834610` на `52de85b2ea25de59aa6e99bdbbeef23bf265b6bc` — ⏳ был в очереди на момент записи.
 
 ## Handoff
-1. ⬜ CI для текущего head после финальной тарифной матрицы.
+1. ⬜ Дождаться зелёного CI для `52de85b2ea25de59aa6e99bdbbeef23bf265b6bc`.
 2. ⬜ Deploy branch head to VPS и restart `media-hunter.service`.
-3. ⬜ Проверить мобильное меню Telegram — старые команды должны исчезнуть.
+3. ⬜ Проверить автопостинг: включить канал и отправить тестовое видео.
 4. ⬜ Проверить `Моё видео`.
 5. ⬜ Проверить YouTube.
 6. ⬜ Проверить PNG logo и video+logo.
-7. ⬜ Проверить enabled autopost.
-8. ⬜ Проверить, что одинаковый watermark не запускает второй FFmpeg.
-9. ⬜ Проверить playlist 5–20 видео и fair interleaving с обычными задачами.
-10. ⬜ Проверить Premium playlist до 40 видео и отсутствие месячного лимита.
-11. ⬜ Проверить playlist >80 MB guard.
-12. ⬜ Проверить free playlist quota: 3 запроса/месяц, 20 видео/запрос.
-13. ⬜ Проверить Free 1 / Premium 3 channel limit.
-14. ⬜ Проверить `ℹ️ Что я умею` и возврат в главное меню.
-15. ⬜ Улучшить stderr logging FFmpeg.
-16. 🔐 Перевыпустить Bot Token через BotFather из-за раскрытия в логах.
+7. ⬜ Проверить одинаковый watermark: один FFmpeg run вместо второго encode.
+8. ⬜ Проверить playlist 5–20 видео и fair interleaving с обычными задачами.
+9. ⬜ Проверить Premium playlist до 40 видео и отсутствие месячного лимита.
+10. ⬜ Проверить playlist >80 MB guard.
+11. ⬜ Проверить free playlist quota: 3 запроса/месяц, 20 видео/запрос.
+12. ⬜ Проверить Free 1 / Premium 3 channel limit.
+13. ⬜ Проверить `ℹ️ Что я умею` и возврат в главное меню.
+14. ⬜ По новым pipeline-логам определить причину задержки доставки видео.
+15. 🔐 Перевыпустить Bot Token через BotFather из-за раскрытия в логах.
