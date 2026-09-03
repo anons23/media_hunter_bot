@@ -84,9 +84,13 @@ def process_media(
     cmd += ["-crf", "30", "-preset", "superfast"] if compress else ["-crf", "27", "-preset", "superfast"]
     base_vf = _unique_video_filters()
     if logo:
+        pct = max(5, min(int(watermark.get("logo_size", 20)), 80)) / 100.0
+        opacity = max(0.05, min(float(watermark.get("logo_opacity", 0.8)), 1.0))
         fc = (
             f"[0:v]{base_vf}[base];"
-            f"[base][1:v]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
+            f"[1:v]format=rgba,colorchannelmixer=aa={opacity:.3f},"
+            f"scale2ref=w=main_w*{pct:.4f}:h=main_h*{pct:.4f}:force_original_aspect_ratio=decrease[logo][ref];"
+            f"[base][logo]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
         )
         cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a?", "-shortest"]
     else:
@@ -145,7 +149,13 @@ def apply_watermark(
         "-preset", "superfast",
     ]
     if logo:
-        fc = f"[0:v][1:v]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
+        pct = max(5, min(int(watermark.get("logo_size", 20)), 80)) / 100.0
+        opacity = max(0.05, min(float(watermark.get("logo_opacity", 0.8)), 1.0))
+        fc = (
+            f"[1:v]format=rgba,colorchannelmixer=aa={opacity:.3f},"
+            f"scale2ref=w=main_w*{pct:.4f}:h=main_h*{pct:.4f}:force_original_aspect_ratio=decrease[logo][ref];"
+            f"[ref][logo]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
+        )
         cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a?", "-shortest"]
     elif has_text:
         text_filter = base._build_text_filter(watermark, work_dir)
