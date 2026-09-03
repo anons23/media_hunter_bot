@@ -115,7 +115,8 @@
   - `64e220e667f5d83202cbe5081c39f74ccfb0c6bb`
   - `aa248aa50e0ee61d69c129ded0a8cc08d658c9f7`
   - `e8007d3ad84c7a76f748bd4290704c782b4c0e6d` — documentation/frozen-base handoff.
-- ⬜ Важное замечание: текущий `apply_watermark()` для logo использует direct overlay и не проходит старый `wm_wizard` render pipeline; перед production нужно отдельно проверить размер/opacity logo для multi-channel режима.
+- Первоначально было отмечено, что `apply_watermark()` для logo использовал direct overlay и не проходил старый `wm_wizard` render pipeline.
+- ✅ В текущей версии это исправлено: размер/opacity logo учитываются непосредственно в FFmpeg filter graph.
 
 ## Autopost: first-channel watermark for user result — 2026-09-03
 ### Новое правило
@@ -168,7 +169,7 @@
 - Run `33765082009` на `a90d72b3bc7a3a6474fe27d45cef165d130316e3` — ✅ green.
 - Latest legacy-cleanup runs: `33775146383` — ✅; `33775162559` — compile и regression tests завершены успешно.
 - Latest confirmed full green before explicit photo-handler rework: run `33781401170` на `a0f09948...` — ✅ compile + regression tests.
-- New explicit photo-handler commit `26451a2c57fdee09cc0aad3e4a4f74911980b2c0` is pending CI confirmation.
+- CI workflow now also compiles `optimized_processor.py`, `process_cache.py`, `logo_upload_fix.py` and `legacy_watermark_guard.py`; this closes a previous CI coverage gap.
 
 ## Logo upload fix — 2026-09-03
 ### Причина
@@ -185,23 +186,36 @@
 
 ### Повторная диагностика после production smoke
 - После деплоя предыдущей версии пользователь снова получил полное молчание при отправке обычного фото.
-- Чтобы исключить зависимость от порядка middleware, `logo_upload_fix.py` теперь регистрирует **явный router message handler** `LogoStates.upload + F.photo`, вместо middleware-only interception.
-- Старый `F.document` handler в `wm_wizard.py` не удалён.
-- Новый commit: `26451a2c57fdee09cc0aad3e4a4f74911980b2c0`.
-- ⬜ Нужен CI и production smoke именно для этой версии.
+- `logo_upload_fix.py` получил явный router handler `LogoStates.upload + F.photo`.
+- Production smoke всё ещё показал `Update ... is not handled`, поэтому одной регистрации через root `main.py` оказалось недостаточно.
+- Причина усиления bootstrap: если service запускает `handlers.py` напрямую, root `main.py` patch не выполняется. Поэтому теперь `media_hunter_bot/__init__.py` оборачивает `register_wm_wizard()` и гарантирует регистрацию photo handler в любом поддержанном bootstrap пути.
+- Новый commit: `146dc7ed2508d907b81d04100e605e432fb954c7`.
+
+### Logo watermark rendering
+- Выявлен отдельный production-риск: `process_cache.py` вызывает `optimized_processor.apply_watermark()` напрямую, поэтому старый `_install_logo_processing_wrapper()` из `wm_wizard.py` не гарантировал применение `logo_size`/`logo_opacity` в cached multi-channel path.
+- `optimized_processor.py` теперь применяет `logo_size` и `logo_opacity` непосредственно в FFmpeg filter graph через `scale2ref` + `colorchannelmixer`, сохраняя frozen unique base без повторной уникализации.
+- Commit: `4c51f6074dabe2f381698ffe419a9f00ba805b48`.
+- Добавлен regression test `tests/test_optimized_logo.py`.
+- Добавлен regression test `tests/test_logo_router_registration.py`.
+- ⬜ Production smoke logo: обычное фото → экран настроек → сохранить → короткое видео → проверить размер/opacity/позицию.
+
+### CI coverage
+- `.github/workflows/tests.yml` расширен: compile теперь включает все runtime patch-модули, а не только основные файлы.
+- Commit: `3fb66ea96979ad275aa8e7b84437d7a48c5eab1a`.
+- ⬜ Новый CI для текущей головы после всех этих изменений.
 
 ## Handoff / текущий статус
 1. Branch: `Media_hanter-v3-security`.
-2. Latest branch head: `26451a2c57fdee09cc0aad3e4a4f74911980b2c0`.
-3. Latest fully green CI: run `33781401170` на `a0f09948...` — ✅.
-4. New explicit photo-handler commit `26451a2c...` awaits CI confirmation.
-5. Production deploy of the explicit handler is ⬜ until CI passes.
-6. After deploy, restart `media-hunter.service`.
-7. First smoke: open watermark → logo → send a normal gallery photo (not document) → settings screen must appear.
-8. Then save logo and process a short video; verify logo appears on output.
-9. Verify old `Мой канал` watermark is not applied.
-10. Verify 1-channel autopost uses exact same processed file / no second FFmpeg.
-11. Multi-channel smoke: verify `UNIQUE_BASE_CREATE` once and channel variants without repeated uniqueness.
-12. Playlist smoke remains ⬜.
-13. Premium/free channel-limit smoke remains ⬜.
+2. Latest code head before this journal commit: `4c51f6074dabe2f381698ffe419a9f00ba805b48` plus subsequent test/CI commits `7199f879ca07bf24a579c720cf40b968cdd5a383`, `c2e89c89ae0bcd4d66e12130d6d6e2444567c6c6`, `3fb66ea96979ad275aa8e7b84437d7a48c5eab1a`, and this journal update.
+3. Photo handler is now registered from the watermark wizard bootstrap itself via package initialization, not only from root `main.py`.
+4. Logo watermark size/opacity is now applied in the cached processor path as well.
+5. ⬜ Current CI must pass before production deployment.
+6. ⬜ After CI: update VPS, restart `media-hunter.service`, and verify `systemctl status`.
+7. ⬜ Smoke: open watermark → logo → send normal gallery photo → settings screen must appear.
+8. ⬜ Smoke: save logo → process short video → verify logo is actually visible with selected size/opacity/position.
+9. ⬜ Verify old `Мой канал` watermark is not applied.
+10. ⬜ Verify 1-channel autopost uses exact same processed file / no second FFmpeg.
+11. ⬜ Multi-channel: verify `UNIQUE_BASE_CREATE` once and channel variants without repeated uniqueness.
+12. ⬜ Playlist smoke: 5–20 videos, fair interleaving, 80 MB guard, Free quota, Premium 40.
+13. ⬜ Premium/free channel-limit smoke.
 14. Never record bot tokens or `.env` contents in this journal.
