@@ -9,7 +9,6 @@ class TestLogoUploadFix(unittest.IsolatedAsyncioTestCase):
     async def test_photo_upload_saves_png_and_enters_settings(self):
         message = MagicMock()
         message.photo = [MagicMock(file_id="photo-file", file_size=1000)]
-        message.photo[-1].file_id = "photo-file"
         message.from_user.id = 123
         message.answer = AsyncMock()
 
@@ -26,12 +25,9 @@ class TestLogoUploadFix(unittest.IsolatedAsyncioTestCase):
 
         bot.download_file = AsyncMock(side_effect=fake_download)
 
-        with patch.object(logo_upload_fix.LOGO_DIR, "mkdir", new=AsyncMock()), \
+        with patch.object(logo_upload_fix.LOGO_DIR, "mkdir") as mkdir, \
              patch.object(logo_upload_fix.subprocess, "run") as run, \
              patch.object(logo_upload_fix, "validate_logo", return_value=(True, "")):
-            run.return_value.returncode = 0
-            run.return_value.stderr = ""
-            # ffmpeg is expected to create the converted PNG; emulate it.
             def fake_run(*args, **kwargs):
                 output = Path(args[0][-1])
                 output.write_bytes(b"png")
@@ -43,6 +39,7 @@ class TestLogoUploadFix(unittest.IsolatedAsyncioTestCase):
             handled = await logo_upload_fix._handle_photo(message, bot, state)
 
         self.assertTrue(handled)
+        mkdir.assert_called_once_with(parents=True, exist_ok=True)
         state.set_state.assert_awaited_once_with(logo_upload_fix.LogoStates.settings)
         self.assertTrue(state.update_data.await_count >= 1)
         message.answer.assert_awaited_once()
