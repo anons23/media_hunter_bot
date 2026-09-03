@@ -96,9 +96,10 @@
 - Это не повторная обработка уже созданного файла, потому что channel processing идёт от исходника, но для совпадающего watermark это всё равно лишний encode.
 - Требуется рефакторинг: при совпадающем эффективном watermark переиспользовать private output; для разных watermark отдельный output допустим; одинаковые channel profiles должны использовать один результат.
 - ✅ Добавлен `media_hunter_bot/process_cache.py`: кэш результата ограничен комбинацией source/work/watermark/audio_only/compress, поэтому повторно используется только результат внутри того же job и только при полностью совпадающем профиле.
-- ✅ `media_hunter_bot/__init__.py` оборачивает оптимизированный `process_media` через этот cache до импорта `handlers.py`.
+- ⚠️ До 2026-09-03 была скрытая проблема: `handlers.py` импортирует `process_media` напрямую (`from .processor import process_media`), поэтому последующая замена `processor.process_media` в `__init__.py` не меняла уже сохранённую локальную ссылку в `handlers.py`.
+- ✅ `main.py` теперь после импорта `handlers.py` явно привязывает `_handlers.process_media = _cached_process_entry`; поэтому cache реально охватывает private и autopost вызовы из `_run_job()`.
 - ✅ Разные watermark и разные режимы compression получают независимые FFmpeg outputs.
-- ⬜ Production проверить, что private + channel с одинаковым watermark дают один FFmpeg run.
+- ⬜ Production подтвердить, что private + channel с одинаковым watermark дают один FFmpeg run.
 
 ## Local Bot API upload/logo bug — 2026-09-02
 - Production log показал, что `Моё видео` падает **до FFmpeg**.
@@ -226,3 +227,14 @@
 13. ⬜ Проверить `ℹ️ Что я умею` и возврат в главное меню.
 14. ⬜ По новым pipeline-логам определить причину задержки доставки видео.
 15. 🔐 Перевыпустить Bot Token через BotFather из-за раскрытия в логах.
+
+## Autopost cache binding fix — 2026-09-03
+- Production smoke test показал `PROCESS_START` → `PROCESS_DONE` (~50.7 s) → private send → новый `PROCESS_START` для channel autopost.
+- Анализ кода подтвердил причину: `handlers.py` получает `process_media` прямым импортом до того, как bootstrap-патч меняет `processor.process_media`. Поэтому `process_cache.py` фактически не охватывал вызовы `_run_job()` из `handlers.py`.
+- ✅ `main.py` теперь явно устанавливает `_handlers.process_media = _cached_process_entry` после импорта `handlers.py` и до запуска polling/диагностики.
+- Это точечный fix без изменения `handlers.py` и без отключения уникализации.
+- При одинаковом source/work/watermark/audio/compress cache должен вернуть уже готовый output и не запускать второй FFmpeg. При различающихся watermark/compression профилях отдельная обработка по-прежнему необходима.
+- Fix commit: `fdc4df95a1df8a59339d7db9a726e07a01426179`.
+- ⬜ CI для `fdc4df95a1df8a59339d7db9a726e07a01426179`.
+- ⬜ Deploy на VPS.
+- ⬜ Production smoke test: при одинаковом watermark ожидается только один `PROCESS_START`; при разном watermark — два.
