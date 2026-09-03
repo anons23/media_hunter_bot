@@ -14,14 +14,19 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import COOKIES_PATH, DB_PATH, MAX_PLAYLIST_ITEMS
+from .config import (
+    COOKIES_PATH,
+    DB_PATH,
+    FREE_PLAYLISTS_PER_MONTH,
+    FREE_PLAYLIST_MAX_VIDEOS,
+    MAX_PLAYLIST_ITEMS,
+    PREMIUM_PLAYLIST_MAX_VIDEOS,
+)
 from . import db
 from .processor import playlist_items, validate_source_url
 
 logger = logging.getLogger(__name__)
 
-FREE_PLAYLIST_MAX_VIDEOS = 20
-FREE_PLAYLISTS_PER_MONTH = 3
 PLAYLIST_MAX_ORIGINAL_MB = 80
 
 
@@ -126,8 +131,9 @@ def inspect_playlist(url: str, probe_limit: int) -> tuple[list[str], int | None]
 
 
 def _priority(premium: bool, playlist: bool = False) -> int:
-    # Playlists always yield to ordinary jobs. This prevents a long Premium
-    # playlist from monopolizing the single worker as well.
+    # Playlist items intentionally yield to ordinary jobs. Premium ordinary
+    # jobs use priority 0, free ordinary jobs priority 1, playlist items 2.
+    # There is no preemption: a currently running FFmpeg job finishes first.
     if playlist:
         return 2
     return 0 if premium else 1
@@ -150,7 +156,10 @@ def patch_engine(engine_cls, handlers_module) -> None:
 
         safe = validate_source_url(url)
         premium = await db.ais_premium(uid)
-        limit = MAX_PLAYLIST_ITEMS if premium else FREE_PLAYLIST_MAX_VIDEOS
+        limit = PREMIUM_PLAYLIST_MAX_VIDEOS if premium else FREE_PLAYLIST_MAX_VIDEOS
+        # MAX_PLAYLIST_ITEMS remains the deployment-level safety ceiling; the
+        # product policy for Premium is 40.
+        limit = min(limit, MAX_PLAYLIST_ITEMS)
         items, total = await asyncio.to_thread(inspect_playlist, safe, limit)
         if len(items) <= 1:
             return await original_add(self, uid, url=safe, source=source)
@@ -205,7 +214,8 @@ def patch_engine(engine_cls, handlers_module) -> None:
                 uid,
                 f"📚 Найдено {int(total or len(items))} видео в плейлисте. "
                 f"В этом запросе будут обработаны первые {len(items)}.\n"
-                "▶️ Видео идут по одному и не должны надолго блокировать очередь.",
+                "⭐ Premium: без месячного лимита плейлистов, до 40 видео за запрос.\n"
+                "▶️ Каждое видео полностью обрабатывается (уникализация/водяной знак/автопост), затем очередь продолжает следующий элемент.",
             )
         else:
             extra = " Остальные видео будут пропущены." if (total or len(items)) > len(items) else ""
@@ -215,7 +225,7 @@ def patch_engine(engine_cls, handlers_module) -> None:
                 f"🆓 Бесплатный тариф: за раз обрабатываются только первые {len(items)} видео.{extra}\n"
                 f"📅 Лимит: до {FREE_PLAYLIST_MAX_VIDEOS} видео за запрос и {FREE_PLAYLISTS_PER_MONTH} плейлистов в месяц.\n"
                 f"⚠️ Видео из плейлиста должны быть не больше {PLAYLIST_MAX_ORIGINAL_MB} МБ в оригинале.\n"
-                "▶️ Видео идут по одному и обычные задачи могут проходить между ними.",
+                "▶️ Каждое видео полностью обрабатывается (уникализация/водяной знак/автопост), затем очередь продолжает следующий элемент.",
             )
 
     async def run_job(self, j):
@@ -273,6 +283,10 @@ def patch_engine(engine_cls, handlers_module) -> None:
                 )
             source, title = original_download(url, work_dir, register)
             if source.exists() and source.stat().st_size > PLAYLIST_MAX_ORIGINAL_MB * 1024 * 1024:
+                try:
+                    source.unlink()
+                except OSError:
+                    pass
                 raise RuntimeError(
                     f"Видео из плейлиста пропущено: исходный размер больше {PLAYLIST_MAX_ORIGINAL_MB} МБ."
                 )
