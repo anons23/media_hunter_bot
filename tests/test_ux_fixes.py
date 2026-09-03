@@ -10,6 +10,11 @@ class UxFixTests(unittest.TestCase):
         for expected in ("wmtext", "wmtext_edit", "wmtext_delete", "wmlogo", "wmlogo_edit", "wmlogo_delete", "toggle:"):
             self.assertIn(expected, source)
 
+    def test_autopost_toggle_uses_async_db_api(self):
+        source = inspect.getsource(ux_fixes._toggle_autopost)
+        self.assertIn("await db.aset_channel_enabled", source)
+        self.assertNotIn("await db.set_channel_enabled", source)
+
     def test_router_patch_is_idempotent(self):
         from aiogram import Router
 
