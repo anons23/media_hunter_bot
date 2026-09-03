@@ -20,6 +20,28 @@ def _unique_video_filters() -> str:
     )
 
 
+def _run_ffmpeg(cmd: list[str], output: Path, work_dir: Path, register: Callable[[Any], None]) -> Path:
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+        register(proc)
+        try:
+            _, stderr = proc.communicate(timeout=600)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            base.logger.warning("ffmpeg timed out (10 min) for work_dir=%s", work_dir)
+            raise RuntimeError("Не удалось обработать медиа. Файл повреждён или формат не поддерживается.")
+        finally:
+            register(None)
+        if proc.returncode != 0:
+            err_text = stderr.decode("utf-8", "replace")
+            base.logger.warning("ffmpeg failed (code=%s): %s", proc.returncode, err_text[-2000:])
+            raise RuntimeError("Не удалось обработать медиа. Файл повреждён или формат не поддерживается.")
+    if not output.exists():
+        base.logger.warning("ffmpeg finished but output missing in %s", work_dir)
+        raise RuntimeError("Не удалось обработать медиа. Результат не получен.")
+    return output
+
+
 def process_media(
     source: Path,
     work_dir: Path,
@@ -39,59 +61,99 @@ def process_media(
             "ffmpeg", "-y", "-i", str(source), "-vn", "-ar", "44100", "-ac", "2",
             "-threads", "1", str(output),
         ]
-    else:
-        logo = base._logo_path(watermark) if watermark.get("type") == "image" else None
-        has_text = watermark.get("type") == "text" and bool(watermark.get("text"))
-        output = work_dir / "output.mp4"
-        cmd = ["ffmpeg", "-y", "-i", str(source)]
-        if logo:
-            cmd += ["-i", str(logo)]
-        cmd += [
-            "-c:v", "libx264",
-            "-threads", "2",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-movflags", "+faststart",
-            "-map_metadata", "-1",
-            "-metadata", "comment=media_hunter",
-        ]
-        # The VPS is CPU-bound on watermark/autopost re-encodes. superfast
-        # substantially reduces wall-clock time while uniqueness remains
-        # active through the filter above. Compression keeps a separate CRF.
-        cmd += ["-crf", "30", "-preset", "superfast"] if compress else ["-crf", "27", "-preset", "superfast"]
-        base_vf = _unique_video_filters()
-        if logo:
-            fc = (
-                f"[0:v]{base_vf}[base];"
-                f"[base][1:v]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
-            )
-            cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a?", "-shortest"]
-        else:
-            vf_parts = [base_vf]
-            if has_text:
-                text_filter = base._build_text_filter(watermark, work_dir)
-                if text_filter:
-                    vf_parts.append(text_filter)
-            cmd += ["-vf", ",".join(vf_parts), "-af", "volume=1.01"]
-        cmd.append(str(output))
+        return _run_ffmpeg(cmd, output, work_dir, register)
 
-    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
-        register(proc)
-        try:
-            _, stderr = proc.communicate(timeout=600)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            logger = base.logger
-            logger.warning("ffmpeg timed out (10 min) for work_dir=%s", work_dir)
-            raise RuntimeError("Не удалось обработать медиа. Файл повреждён или формат не поддерживается.")
-        finally:
-            register(None)
-        if proc.returncode != 0:
-            err_text = stderr.decode("utf-8", "replace")
-            base.logger.warning("ffmpeg failed (code=%s): %s", proc.returncode, err_text[-2000:])
-            raise RuntimeError("Не удалось обработать медиа. Файл повреждён или формат не поддерживается.")
-    if not output.exists():
-        base.logger.warning("ffmpeg finished but output missing in %s", work_dir)
-        raise RuntimeError("Не удалось обработать медиа. Результат не получен.")
-    return output
+    logo = base._logo_path(watermark) if watermark.get("type") == "image" else None
+    has_text = watermark.get("type") == "text" and bool(watermark.get("text"))
+    output = work_dir / "output.mp4"
+    cmd = ["ffmpeg", "-y", "-i", str(source)]
+    if logo:
+        cmd += ["-i", str(logo)]
+    cmd += [
+        "-c:v", "libx264",
+        "-threads", "2",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+        "-map_metadata", "-1",
+        "-metadata", "comment=media_hunter",
+    ]
+    # The VPS is CPU-bound on watermark/autopost re-encodes. superfast
+    # substantially reduces wall-clock time while uniqueness remains
+    # active through the filter above. Compression keeps a separate CRF.
+    cmd += ["-crf", "30", "-preset", "superfast"] if compress else ["-crf", "27", "-preset", "superfast"]
+    base_vf = _unique_video_filters()
+    if logo:
+        fc = (
+            f"[0:v]{base_vf}[base];"
+            f"[base][1:v]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
+        )
+        cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a?", "-shortest"]
+    else:
+        vf_parts = [base_vf]
+        if has_text:
+            text_filter = base._build_text_filter(watermark, work_dir)
+            if text_filter:
+                vf_parts.append(text_filter)
+        cmd += ["-vf", ",".join(vf_parts), "-af", "volume=1.01"]
+    cmd.append(str(output))
+    return _run_ffmpeg(cmd, output, work_dir, register)
+
+
+def apply_watermark(
+    source: Path,
+    work_dir: Path,
+    watermark: dict[str, Any],
+    compress: bool,
+    register: Callable[[Any], None],
+) -> Path:
+    """Apply only the watermark to an already-unique video.
+
+    No uniqueness filter is applied here. This is intentionally a separate
+    stage used when a user has multiple autopost channels with different
+    watermark profiles: the expensive uniqueness pass happens once, then
+    each channel receives its own watermark variant from that frozen base.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    if not watermark or not watermark.get("type"):
+        return source
+
+    import hashlib
+    import json
+
+    profile = json.dumps(watermark, ensure_ascii=False, sort_keys=True, default=str)
+    suffix = hashlib.sha1(profile.encode("utf-8")).hexdigest()[:12]
+    output = work_dir / f"watermark_{suffix}.mp4"
+    if output.exists():
+        base.logger.info("WATERMARK_VARIANT_HIT work=%s file=%s", work_dir, output.name)
+        return output
+
+    logo = base._logo_path(watermark) if watermark.get("type") == "image" else None
+    has_text = watermark.get("type") == "text" and bool(watermark.get("text"))
+    cmd = ["ffmpeg", "-y", "-i", str(source)]
+    if logo:
+        cmd += ["-i", str(logo)]
+    cmd += [
+        "-c:v", "libx264",
+        "-threads", "2",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+        "-map_metadata", "-1",
+        "-metadata", "comment=media_hunter",
+        "-crf", "30" if compress else "27",
+        "-preset", "superfast",
+    ]
+    if logo:
+        fc = f"[0:v][1:v]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
+        cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a?", "-shortest"]
+    elif has_text:
+        text_filter = base._build_text_filter(watermark, work_dir)
+        if not text_filter:
+            return source
+        cmd += ["-vf", text_filter, "-af", "volume=1.01"]
+    else:
+        return source
+    cmd.append(str(output))
+    base.logger.info("WATERMARK_VARIANT_CREATE work=%s file=%s", work_dir, output.name)
+    return _run_ffmpeg(cmd, output, work_dir, register)
