@@ -35,7 +35,7 @@ class AboutScreenTests(unittest.TestCase):
             "Без месячного лимита",
             "Premium",
             "Автопостинг",
-            "уникализация",
+            "Уникализация",
         ):
             self.assertIn(expected, ABOUT_TEXT)
 
