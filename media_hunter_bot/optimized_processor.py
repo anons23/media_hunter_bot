@@ -50,9 +50,6 @@ def process_media(
     compress: bool,
     register: Callable[[Any], None],
 ) -> Path:
-    # Be defensive: callers normally create the work directory, but the
-    # processing layer must never fail merely because it disappeared between
-    # queueing and FFmpeg startup.
     work_dir.mkdir(parents=True, exist_ok=True)
 
     if audio_only:
@@ -78,9 +75,6 @@ def process_media(
         "-map_metadata", "-1",
         "-metadata", "comment=media_hunter",
     ]
-    # The VPS is CPU-bound on watermark/autopost re-encodes. superfast
-    # substantially reduces wall-clock time while uniqueness remains
-    # active through the filter above. Compression keeps a separate CRF.
     cmd += ["-crf", "30", "-preset", "superfast"] if compress else ["-crf", "27", "-preset", "superfast"]
     base_vf = _unique_video_filters()
     if logo:
@@ -88,9 +82,9 @@ def process_media(
         opacity = max(0.05, min(float(watermark.get("logo_opacity", 0.8)), 1.0))
         fc = (
             f"[0:v]{base_vf}[base];"
-            f"[1:v]format=rgba,colorchannelmixer=aa={opacity:.3f},"
-            f"scale2ref=w=main_w*{pct:.4f}:h=main_h*{pct:.4f}:force_original_aspect_ratio=decrease[logo][ref];"
-            f"[base][logo]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
+            f"[1:v]format=rgba,colorchannelmixer=aa={opacity:.3f}[logo0];"
+            f"[logo0][base]scale2ref=w=main_w*{pct:.4f}:h=main_h*{pct:.4f}:force_original_aspect_ratio=decrease[logo][base2];"
+            f"[base2][logo]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
         )
         cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a?", "-shortest"]
     else:
@@ -111,13 +105,7 @@ def apply_watermark(
     compress: bool,
     register: Callable[[Any], None],
 ) -> Path:
-    """Apply only the watermark to an already-unique video.
-
-    No uniqueness filter is applied here. This is intentionally a separate
-    stage used when a user has multiple autopost channels with different
-    watermark profiles: the expensive uniqueness pass happens once, then
-    each channel receives its own watermark variant from that frozen base.
-    """
+    """Apply only the watermark to an already-unique video."""
     work_dir.mkdir(parents=True, exist_ok=True)
     if not watermark or not watermark.get("type"):
         return source
@@ -152,9 +140,9 @@ def apply_watermark(
         pct = max(5, min(int(watermark.get("logo_size", 20)), 80)) / 100.0
         opacity = max(0.05, min(float(watermark.get("logo_opacity", 0.8)), 1.0))
         fc = (
-            f"[1:v]format=rgba,colorchannelmixer=aa={opacity:.3f},"
-            f"scale2ref=w=main_w*{pct:.4f}:h=main_h*{pct:.4f}:force_original_aspect_ratio=decrease[logo][ref];"
-            f"[ref][logo]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
+            f"[1:v]format=rgba,colorchannelmixer=aa={opacity:.3f}[logo0];"
+            f"[logo0][0:v]scale2ref=w=main_w*{pct:.4f}:h=main_h*{pct:.4f}:force_original_aspect_ratio=decrease[logo][base];"
+            f"[base][logo]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
         )
         cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a?", "-shortest"]
     elif has_text:
