@@ -1,4 +1,4 @@
-"""What I can do screen for new Media Hunter users."""
+"""Simple user-facing list of the bot's main features."""
 from __future__ import annotations
 
 from aiogram import F
@@ -6,47 +6,45 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 
 ABOUT_TEXT = (
-    "🤖 <b>Media Hunter — что я умею</b>\n\n"
-    "📥 <b>Скачивание</b>\n"
+    "🤖 <b>Media Hunter — возможности</b>\n\n"
+    "📥 <b>Скачать</b>\n"
     "• YouTube, TikTok и Instagram по ссылке\n"
-    "• YouTube-плейлисты — видео обрабатываются по одному\n"
-    "• Можно отправить своё видео прямо в бота\n\n"
-    "💧 <b>Обработка видео</b>\n"
-    "• Уникализация видео\n"
-    "• Текстовый водяной знак\n"
-    "• Водяной знак-логотип (PNG)\n"
-    "• Настройка размера, позиции и прозрачности водяного знака\n"
-    "• Формат: видео или только MP3\n\n"
-    "📺 <b>Автопостинг</b>\n"
-    "• Free: 1 канал\n"
-    "• Premium: до 3 каналов\n"
-    "• Можно настроить отдельный водяной знак для каждого канала\n\n"
-    "🆓 <b>Бесплатный тариф</b>\n"
-    "• До 10 ваших задач в очереди\n"
-    "• Плейлист: первые 20 видео за один запрос\n"
-    "• Не более 3 playlist-запросов в календарный месяц\n"
-    "• Для видео из плейлиста исходный размер — до 80 МБ на видео\n"
-    "• Обычные видео до 100 МБ проходят уникализацию\n\n"
+    "• YouTube-плейлисты — по одному видео\n"
+    "• Можно отправить своё видео\n\n"
+    "💧 <b>Водяной знак</b>\n"
+    "• Текст или PNG-логотип\n"
+    "• Размер, позиция, цвет и прозрачность\n"
+    "• Настройки можно изменить или удалить\n\n"
+    "🔄 <b>Автопостинг</b>\n"
+    "• Free — 1 канал\n"
+    "• Premium — до 3 каналов\n"
+    "• Для каждого канала можно настроить свой водяной знак\n\n"
+    "🛡 <b>Уникализация</b>\n"
+    "• Обычные видео до 100 МБ\n"
+    "• Видео из плейлиста — до 80 МБ на видео\n\n"
+    "🆓 <b>Free</b>\n"
+    "• До 10 задач в очереди\n"
+    "• До 20 видео из одного плейлиста\n"
+    "• До 3 запросов плейлистов в календарный месяц\n\n"
     "⭐ <b>Premium</b>\n"
-    "• Более высокий приоритет в общей очереди\n"
-    "• До 3 каналов\n"
-    "• До 40 видео из одного YouTube-плейлиста\n"
+    "• Приоритет в очереди\n"
+    "• До 40 видео из одного плейлиста\n"
     "• Без месячного лимита на плейлисты\n"
-    "• Плейлисты обрабатываются по одному: после полного завершения одного видео очередь получает возможность обработать другие задачи\n"
-    "• Уникализация, водяной знак и автопостинг работают так же, как для обычных видео\n\n"
-    "💡 <b>Как начать?</b> Нажмите «📥 Скачать» и отправьте ссылку.\n"
-    "Для своего файла используйте «📤 Моё видео»."
+    "• Плейлист обрабатывается по одному видео, не блокируя очередь других пользователей\n\n"
+    "🎬 <b>Формат</b> — видео или MP3\n\n"
+    "💡 Нажмите «📥 Скачать» и отправьте ссылку.\n"
+    "Для своего файла — «📤 Моё видео»."
 )
 
 
 def register_about(router, menu_fn):
-    """Add the about button to the end of the main menu and its screen."""
+    """Add the capabilities button to the end of the main menu."""
     original_menu = menu_fn
 
     def patched_menu(uid: int) -> InlineKeyboardMarkup:
         original = original_menu(uid)
         rows = [list(row) for row in original.inline_keyboard]
-        rows.append([InlineKeyboardButton(text="ℹ️ Что я умею", callback_data="about")])
+        rows.append([InlineKeyboardButton(text="🤖 Возможности", callback_data="about")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def about(c: CallbackQuery):
@@ -56,6 +54,7 @@ def register_about(router, menu_fn):
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back")]]
             ),
+            parse_mode="HTML",
         )
 
     router.callback_query.register(about, F.data == "about")
