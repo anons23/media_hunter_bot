@@ -18,7 +18,7 @@ class AboutScreenTests(unittest.TestCase):
         patched = register_about(router, menu)
         result = patched(123)
 
-        self.assertEqual(result.inline_keyboard[-1][0].text, "ℹ️ Что я умею")
+        self.assertEqual(result.inline_keyboard[-1][0].text, "🤖 Возможности")
         self.assertEqual(result.inline_keyboard[-1][0].callback_data, "about")
         self.assertEqual(result.inline_keyboard[0][0].callback_data, "download")
 
@@ -26,9 +26,9 @@ class AboutScreenTests(unittest.TestCase):
         for expected in (
             "YouTube-плейлисты",
             "20 видео",
-            "3 playlist-запросов",
+            "3 запросов плейлистов",
             "80 МБ",
-            "10 ваших задач",
+            "10 задач",
             "1 канал",
             "до 3 каналов",
             "40 видео",
