@@ -80,35 +80,49 @@
 - Следствие: отдельный channel watermark больше не применяется к автопост-копии. Если пользователю нужен другой watermark именно в канале, это уже отдельный режим и потребует дополнительной обработки.
 
 ### Реализация
-- ✅ `media_hunter_bot/process_cache.py` теперь кэширует по `source + work + audio_only + compress`; watermark намеренно исключён из cache key.
-- Поэтому первый `process_media()` создаёт финальный пользовательский файл, а следующий autopost `process_media()` с другим watermark возвращает тот же файл без FFmpeg.
-- Compression `False` и `True` остаются разными cache entries: если канал реально требует compression retry, второй encode всё ещё допустим.
-- Cache scoped по временному `work`, поэтому результат не может случайно переиспользоваться между разными jobs.
-- Commit: `95ea3fcf8903ac29489a06816512b21b6d9e33fe`.
-- Добавлен regression test на разные watermark при одинаковом source/work/options: ожидается один processor call.
-- Test commit: `8bd812c6ccb2559966b0481627a2d24ff2ff596d`.
-- Этот commit CI упал только потому, что старый regression test ожидал разные outputs для разных watermark. Это ожидание больше не соответствует новому exact-copy режиму.
-- Тест обновлён: разные watermark при одинаковом non-compressed job должны возвращать один и тот же result.
+- `media_hunter_bot/process_cache.py` кэшировал по `source + work + audio_only + compress`; watermark был исключён из cache key.
+- Это давало exact-copy для одного канала, но при нескольких каналах не позволяло каждому каналу иметь собственный watermark.
+- Exact-copy code commit: `95ea3fcf8903ac29489a06816512b21b6d9e33fe`.
 - Test fix commit: `a90d72b3bc7a3a6474fe27d45cef165d130316e3`.
-- CI run `33765082009` был запущен и на момент проверки находился `in_progress`; после завершения проверить итог перед production deploy.
 
-## Autopost cache binding
-- Важно: `handlers.py` импортирует `process_media` напрямую (`from .processor import process_media`), поэтому одного patch `processor.process_media` недостаточно.
-- ✅ `main.py` после импорта handlers явно делает `_handlers.process_media = _cached_process_entry`.
-- Commit: `fdc4df95a1df8a59339d7db9a726e07a01426179`.
-- Ранее были production-only regressions в bootstrap wrapper (`TypeError` из-за positional args и `NameError` из-за удалённых globals); они исправлены и покрыты тестами.
+## Autopost: frozen unique base + channel variants — 2026-09-03
+### Новая схема
+- Пользователь предложил разделить обработку на два этапа: один раз сделать уникализацию и сохранить её результат, а затем накладывать разные watermark для нескольких каналов.
+- Реализована схема:
+  - **0/1 enabled autopost channel:** сохраняется быстрый exact-copy режим — один готовый результат используется повторно.
+  - **2–3 enabled autopost channels:** сначала один раз создаётся `unique_base.mp4` **без watermark**; этот файл считается зафиксированной уникализированной базой текущего job.
+  - Пользовательский результат и каждый channel result создаются из `unique_base.mp4` через watermark-only стадию.
+  - Повторная уникализация для второго/третьего канала не выполняется.
+- `unique_base.mp4` хранится в том же временном `work` каталоге до завершения job; существующий cleanup удаляет каталог после отправок. Это и есть контролируемая временная фиксация результата вместо искусственной `sleep()` паузы.
+- Варианты watermark получают отдельные файлы `watermark_<profile>.mp4`, поэтому разные настройки каналов не конфликтуют.
+- Если watermark отсутствует, возвращается сам `unique_base.mp4` без лишнего FFmpeg.
 
-## Production smoke test 2026-09-03
-- До exact-copy режима: autopost уже работал.
-- Последний фактический лог перед exact-copy изменением:
-  - private `SEND_VIDEO_DONE` — успешно;
-  - autopost `SEND_VIDEO_DONE` — успешно;
-  - два `PROCESS_CACHE_MISS` на одном `work`, примерно 3.85s + 3.63s.
-- Это подтвердило: автопост исправен, но выполняется лишний encode.
-- ⬜ После deploy exact-copy версии ожидается:
-  - один `PROCESS_CACHE_MISS`;
-  - затем `PROCESS_CACHE_HIT` перед автопостом;
-  - отсутствие второго `PROCESS_START`.
+### Изменения кода
+- `media_hunter_bot/optimized_processor.py`: вынесен общий FFmpeg runner и добавлен `apply_watermark()`, который накладывает только watermark на уже уникализированное видео; uniqueness filter в этой стадии не используется.
+- `media_hunter_bot/process_cache.py`: количество enabled каналов определяется по пользователю из имени job work directory; для нескольких каналов создаётся и сохраняется `unique_base.mp4`, затем используются watermark-only variants.
+- `tests/test_process_cache.py`: добавлены проверки одного канала, frozen base для трёх каналов, возврата base без watermark и независимого compression cache entry.
+- Commits:
+  - `6004e6e3f62754ab2f3098128941934e1d5b0e11` — add frozen unique base and watermark-only processing stage.
+  - `64e220e667f5d83202cbe5081c39f74ccfb0c6bb` — freeze unique base for multi-channel watermark variants.
+- CI после этих двух code commits автоматически запущен:
+  - run `33766411230` для `64e220e667f5d83202cbe5081c39f74ccfb0c6bb` — `in_progress` на момент записи;
+  - run `33766434785` для `aa248aa50e0ee61d69c129ded0a8cc08d658c9f7` (test commit) — `queued` на момент записи.
+- ⬜ Перед production deploy обязательно подтвердить green итог обоих/последнего актуального run.
+
+### Ожидаемое поведение в production
+Для 1 канала:
+`unique/process → private send → exact same file to channel`.
+
+Для 2–3 каналов:
+`source → UNIQUE_BASE_CREATE → unique_base.mp4 → user/channel watermark variants → sends`.
+
+Ожидаемые диагностические строки для multi-channel job:
+- `UNIQUE_BASE_CREATE`
+- `UNIQUE_BASE_READY`
+- один уникализирующий `PROCESS_*`
+- `WATERMARK_VARIANT_CREATE` для каждого отличающегося watermark
+- при повторном использовании того же профиля `WATERMARK_VARIANT_HIT`
+- отсутствие повторного uniqueness pass для channel #2/#3.
 
 ## YouTube playlists — 2026-09-03
 - Плейлист не должен занимать worker всеми видео сразу.
@@ -145,13 +159,15 @@
 - Run `33764835219` на `8bd812c6ccb2559966b0481627a2d24ff2ff596d` — ❌ regression test, потому что старый тест ожидал разные outputs для разных watermark; compile и остальные 46 тестов прошли.
 - Run `33765082009` на `a90d72b3bc7a3a6474fe27d45cef165d130316e3` — ⏳ проверялся; итог должен быть подтверждён после завершения.
 - Exact-copy code commit: `95ea3fcf8903ac29489a06816512b21b6d9e33fe`.
+- Multi-channel frozen-base code/test commits: `6004e6e3f62754ab2f3098128941934e1d5b0e11`, `64e220e667f5d83202cbe5081c39f74ccfb0c6bb`, `aa248aa50e0ee61d69c129ded0a8cc08d658c9f7`.
 
 ## Handoff / ближайшие действия
-1. ⬜ Дождаться/проверить CI на `a90d72b3bc7a3a6474fe27d45cef165d130316e3`.
-2. ⬜ После зелёного CI проверить, что branch head соответствует тестированному commit.
+1. ⬜ Дождаться/проверить CI на `64e220e667f5d83202cbe5081c39f74ccfb0c6bb` и `aa248aa50e0ee61d69c129ded0a8cc08d658c9f7`.
+2. ⬜ После зелёного CI проверить branch head.
 3. ⬜ Deploy branch head на VPS и restart `media-hunter.service`.
-4. ⬜ Отправить тестовое видео при включённом autopost.
-5. ⬜ Проверить journalctl: один `PROCESS_START`, `PROCESS_CACHE_MISS`, затем `PROCESS_CACHE_HIT`, затем private send и autopost send без второго FFmpeg.
-6. ⬜ Проверить `Моё видео`, YouTube, PNG logo и video+logo.
-7. ⬜ Проверить playlist и тарифные лимиты.
-8. 🔐 Перевыпустить Bot Token через BotFather, если ещё не сделано.
+4. ⬜ Тест с 1 enabled channel: пользователь и канал должны получить один и тот же готовый файл без второго processing.
+5. ⬜ Тест с 2 channels и разными watermark: одна `UNIQUE_BASE_CREATE`, затем отдельные variants без повторной uniqueness.
+6. ⬜ Проверить случай 3 channels.
+7. ⬜ Проверить `Моё видео`, YouTube, PNG logo и video+logo.
+8. ⬜ Проверить playlist и тарифные лимиты.
+9. 🔐 Перевыпустить Bot Token через BotFather, если ещё не сделано.
