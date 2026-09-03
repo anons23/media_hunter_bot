@@ -1,3 +1,4 @@
+import inspect
 import unittest
 
 from media_hunter_bot import ux_fixes
@@ -5,10 +6,9 @@ from media_hunter_bot import ux_fixes
 
 class UxFixTests(unittest.TestCase):
     def test_expected_callback_actions_exist(self):
-        source = ux_fixes._UxCallbackMiddleware.__call__.__code__.co_consts
-        values = {x for x in source if isinstance(x, str)}
-        for expected in ("wmtext", "wmtext_edit", "wmtext_delete", "wmlogo", "wmlogo_edit", "wmlogo_delete"):
-            self.assertIn(expected, values)
+        source = inspect.getsource(ux_fixes._UxCallbackMiddleware.__call__)
+        for expected in ("wmtext", "wmtext_edit", "wmtext_delete", "wmlogo", "wmlogo_edit", "wmlogo_delete", "toggle:"):
+            self.assertIn(expected, source)
 
     def test_router_patch_is_idempotent(self):
         from aiogram import Router
