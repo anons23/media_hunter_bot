@@ -11,7 +11,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from aiogram import BaseMiddleware
+from aiogram import BaseMiddleware, F
 from aiogram.types import Message
 
 from .config import LOGO_DIR, MAX_WATERMARK_MB
@@ -47,8 +47,6 @@ async def _handle_photo(message: Message, bot, state) -> bool:
         if jpg.stat().st_size > MAX_WATERMARK_MB * 1024 * 1024:
             raise ValueError(f"Изображение превышает максимальный размер {MAX_WATERMARK_MB} МБ.")
 
-        # Telegram photo messages are JPEGs. Convert them to PNG so the saved
-        # logo follows the same format as document uploads.
         proc = await asyncio.to_thread(
             subprocess.run,
             ["ffmpeg", "-y", "-i", str(jpg), "-frames:v", "1", "-pix_fmt", "rgba", str(p)],
@@ -102,5 +100,13 @@ class _LogoPhotoUploadMiddleware(BaseMiddleware):
 def patch_router(router):
     if getattr(router, "_media_hunter_logo_photo_patched", False):
         return
+
+    # Register an explicit state+photo handler. The middleware remains as a
+    # safety net, but a real router handler is more reliable across aiogram
+    # dispatcher/middleware ordering and makes Message.photo handling explicit.
+    @router.message(LogoStates.upload, F.photo)
+    async def _logo_photo_message(message: Message, bot, state):
+        await _handle_photo(message, bot, state)
+
     router.message.outer_middleware(_LogoPhotoUploadMiddleware())
     router._media_hunter_logo_photo_patched = True
