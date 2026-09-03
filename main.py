@@ -15,6 +15,7 @@ from media_hunter_bot import playlist_support
 from media_hunter_bot import handlers as _handlers
 from media_hunter_bot import about as _about
 from media_hunter_bot import ux_fixes as _ux_fixes
+from media_hunter_bot import logo_upload_fix as _logo_upload_fix
 from media_hunter_bot import runtime_diagnostics as _runtime_diagnostics
 from media_hunter_bot import pipeline_diagnostics as _pipeline_diagnostics
 from media_hunter_bot import _cached_process_entry
@@ -33,6 +34,7 @@ _pipeline_diagnostics.patch_handlers(_handlers)
 _pipeline_diagnostics.patch_bot_sends(_Bot)
 _handlers.menu = _about.register_about(_handlers.router, _handlers.menu)
 _ux_fixes.patch_router(_handlers.router)
+_logo_upload_fix.patch_router(_handlers.router)
 
 
 if __name__ == "__main__":
