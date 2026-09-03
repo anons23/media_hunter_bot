@@ -18,6 +18,7 @@ from media_hunter_bot import ux_fixes as _ux_fixes
 from media_hunter_bot import runtime_diagnostics as _runtime_diagnostics
 from media_hunter_bot import pipeline_diagnostics as _pipeline_diagnostics
 from media_hunter_bot import _cached_process_entry
+from media_hunter_bot import legacy_watermark_guard as _legacy_watermark_guard
 from aiogram import Bot as _Bot
 
 playlist_support.patch_engine(_handlers.Engine, _handlers)
@@ -37,4 +38,5 @@ _ux_fixes.patch_router(_handlers.router)
 if __name__ == "__main__":
     ensure_directories()
     validate()
+    _legacy_watermark_guard.cleanup_legacy_watermark(__import__("media_hunter_bot.config", fromlist=["DB_PATH"]).DB_PATH)
     asyncio.run(main())
