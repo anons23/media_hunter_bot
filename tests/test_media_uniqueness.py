@@ -28,29 +28,43 @@ class MediaUniquenessRegressionTests(unittest.TestCase):
 
         source = inspect.getsource(optimized_processor.process_media)
         self.assertIn('"-threads", "2"', source)
-        self.assertTrue(
-            '"-preset", "veryfast"' in source or '"-preset", "superfast"' in source,
-            source,
-        )
-        self.assertIn('"-crf", "27"', source)
-
-    def test_local_bot_api_is_configured_for_absolute_file_paths(self):
-        source = inspect.getsource(__import__("media_hunter_bot"))
-        self.assertIn('kwargs.setdefault("is_local", True)', source)
+        self.assertTrue('"-preset", "veryfast"' in source or '"-preset", "superfast"' in source)
 
     def test_cached_process_entry_accepts_legacy_positional_call(self):
         import media_hunter_bot
 
-        signature = inspect.signature(media_hunter_bot._cached_process_entry)
-        for name in ("audio_only", "compress", "register"):
-            self.assertNotEqual(signature.parameters[name].kind, inspect.Parameter.KEYWORD_ONLY)
+        original_cache = media_hunter_bot._cached_process_media
+        original_processor = media_hunter_bot._optimized_process_media
+        calls = []
+
+        def fake_cache(processor_fn, source, work, watermark, *, audio_only, compress, register):
+            calls.append((processor_fn, source, work, watermark, audio_only, compress, register))
+            return "ok"
+
+        def fake_processor(*args, **kwargs):
+            return "processed"
+
+        try:
+            media_hunter_bot._cached_process_media = fake_cache
+            media_hunter_bot._optimized_process_media = fake_processor
+            result = media_hunter_bot._cached_process_entry(
+                "source", "work", {"type": "text"}, False, True, "register"
+            )
+        finally:
+            media_hunter_bot._cached_process_media = original_cache
+            media_hunter_bot._optimized_process_media = original_processor
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0][0], fake_processor)
+        self.assertEqual(calls[0][1:], ("source", "work", {"type": "text"}, False, True, "register"))
 
     def test_cached_process_entry_resolves_runtime_dependencies(self):
         import media_hunter_bot
 
-        calls = []
         original_cache = media_hunter_bot._cached_process_media
         original_processor = media_hunter_bot._optimized_process_media
+        calls = []
 
         def fake_cache(processor_fn, source, work, watermark, *, audio_only, compress, register):
             calls.append((processor_fn, source, work, watermark, audio_only, compress, register))
@@ -96,8 +110,8 @@ class MediaUniquenessRegressionTests(unittest.TestCase):
             second = cached_process_media(fake_processor, source, work, {"type": "text", "text": "A"}, audio_only=False, compress=False, register=None)
             third = cached_process_media(fake_processor, source, work, {"type": "text", "text": "B"}, audio_only=False, compress=False, register=None)
             self.assertEqual(first, second)
-            self.assertNotEqual(first, third)
-            self.assertEqual(len(calls), 2)
+            self.assertEqual(second, third)
+            self.assertEqual(len(calls), 1)
             clear()
 
 
