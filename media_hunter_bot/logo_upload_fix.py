@@ -11,7 +11,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from aiogram import BaseMiddleware, F
+from aiogram import F
 from aiogram.types import Message
 
 from .config import LOGO_DIR, MAX_WATERMARK_MB
@@ -84,29 +84,14 @@ async def _handle_photo(message: Message, bot, state) -> bool:
     return True
 
 
-class _LogoPhotoUploadMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event, data):
-        if isinstance(event, Message) and event.photo:
-            state = data.get("state")
-            if state is not None:
-                current = await state.get_state()
-                if current == LogoStates.upload.state:
-                    handled = await _handle_photo(event, data["bot"], state)
-                    if handled:
-                        return None
-        return await handler(event, data)
-
-
 def patch_router(router):
     if getattr(router, "_media_hunter_logo_photo_patched", False):
         return
 
-    # Register an explicit state+photo handler. The middleware remains as a
-    # safety net, but a real router handler is more reliable across aiogram
-    # dispatcher/middleware ordering and makes Message.photo handling explicit.
+    # Explicit router handler: Telegram gallery images arrive as Message.photo.
+    # The legacy wizard already handles F.document separately.
     @router.message(LogoStates.upload, F.photo)
     async def _logo_photo_message(message: Message, bot, state):
         await _handle_photo(message, bot, state)
 
-    router.message.outer_middleware(_LogoPhotoUploadMiddleware())
     router._media_hunter_logo_photo_patched = True
