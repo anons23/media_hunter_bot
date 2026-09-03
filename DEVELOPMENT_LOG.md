@@ -125,7 +125,7 @@
 ## Новый production bug: удалённые runtime globals — 2026-09-02
 - После deploy branch head `ef86b3d8f85751d8af5c8b6b5165adbae8235daf` production повторно упал при запуске обработки.
 - Первый traceback: `TypeError: <lambda>() takes 3 positional arguments but 6 were given` был уже исправлен в коде, после restart он сменился на:
-  `NameError: name '_cached_process_media' is not defined. Did you mean: '_cached_process_entry'?`
+  `NameError: name '_cached_process_media' is not defined. Did you mean '_cached_process_entry'?`
 - Точная причина: `_cached_process_entry()` разрешает `_cached_process_media` и `_optimized_process_media` во время реального вызова, но внизу `__init__.py` обе переменные были удалены через `del`. Это было не покрыто предыдущим regression test, потому что тест проверял только сигнатуру.
 - ❌ Это production-only ошибка bootstrap-кода, не FFmpeg и не проблема уникализации.
 - ✅ Убрано удаление `_cached_process_media` и `_optimized_process_media`; добавлен regression test, который реально вызывает `_cached_process_entry` шестью позиционными аргументами с подменёнными зависимостями и ловит NameError-класс регрессии.
@@ -137,6 +137,29 @@
 - ⬜ Production smoke test video+logo.
 - ⬜ Production проверить autopost и отсутствие второго encode при совпадающем профиле.
 
+## YouTube playlists — 2026-09-03
+- В исходной реализации playlist URL сначала разворачивался в список ссылок через `playlist_items()`, затем все элементы пытались сразу положить в общую очередь. Из-за `MAX_USER_QUEUE=10` плейлист фактически упирался в лимит пользователя и мог быть отклонён целиком.
+- ❌ Не нужно просто снимать `MAX_USER_QUEUE` и складывать 20–50 отдельных задач: при `MAX_CONCURRENT=1` это могло надолго занять единственный worker и заморозить обычные задачи.
+- ✅ Добавлен `media_hunter_bot/playlist_support.py`, подключаемый после импорта `handlers.py` из root `main.py`, без массовой переделки `handlers.py`.
+- ✅ Плейлист теперь считается **одной логической задачей пользователя** и не расходует лимит `MAX_USER_QUEUE` на каждый элемент. Продолжение добавляется в очередь только после завершения предыдущего видео.
+- ✅ Playlist continuation получает низший приоритет `2`, поэтому обычные бесплатные/премиум задачи могут проходить между видео плейлиста. Это снижает риск блокировки общей очереди при `MAX_CONCURRENT=1`.
+- ✅ Бесплатный тариф: максимум **20 первых видео за один плейлист** и максимум **3 playlist-запроса в календарный месяц**. Лимит хранится в SQLite (`playlist_usage`), поэтому restart не сбрасывает месячный счётчик.
+- ✅ Premium сохраняет текущий верхний предел `MAX_PLAYLIST_ITEMS` (по умолчанию 50), но также обрабатывает видео по одному и не монополизирует worker.
+- ✅ Перед постановкой playlist-запроса бот получает общее количество элементов через `playlist_count`, а пользователю отправляется сообщение вида: `📚 Найдено 80 видео... Бесплатный тариф: за раз обрабатываются только первые 20...`.
+- ✅ Для playlist-видео введён отдельный исходный лимит **80 MB**. Если yt-dlp заранее сообщает известный `filesize/filesize_approx` выше 80 MB, загрузка такого видео не начинается. Если размер заранее неизвестен, после загрузки размер проверяется и файл не передаётся в обычную обработку/FFmpeg.
+- ⚠️ Для HLS/DASH и других форматов yt-dlp может не знать точный размер до загрузки; поэтому пост-проверка после скачивания остаётся обязательной. Документация yt-dlp также отмечает ограничения `--max-filesize` для manifest-потоков. citeturn3search0turn3search2
+- ✅ Обычные одиночные URL и `Моё видео` не получили новый 80 MB playlist-лимит.
+- Commit: `43e29244c081c2ae16ef96d20a76e992d4e754c3` — initial playlist support.
+- Commit: `4e45567f54c9d1a85f70c253d231f321ea01a4d1` — refined scheduler/limits/guards.
+- Commit: `2a61db1862c9d8b7c4d7952afc80e13b43cd25f3` — wire support into root startup.
+- Commit: `01846cdfa2dd3a5843cd04d7e1108cb3fffc8685` — playlist policy regression tests.
+- Commit: `2863e6627d63eb01616273abb1e746e6fef2a436` — include playlist module in CI compile step.
+- ⬜ CI для playlist changes — после push пока не возвращён workflow result через доступный GitHub Actions endpoint.
+- ⬜ Production smoke test: playlist 5–20 видео.
+- ⬜ Production проверить, что обычная задача пользователя/другого пользователя проходит между playlist-видео.
+- ⬜ Production проверить отказ/пропуск playlist-видео >80 MB без FFmpeg.
+- ⬜ Production проверить месячный лимит 3 playlist-запроса free-пользователя.
+
 ## Tests / CI
 - `.github/workflows/tests.yml`: install dependencies → compile → `unittest discover`.
 - Run `33648480341` — ✅ success.
@@ -147,8 +170,15 @@
 - Run `33655799262` на `1fab8a9a...` — ✅ success.
 - ⬜ CI для commits `d82cb3c4...`, `7d76f3cb...`.
 - ⬜ CI для `59c20fb4...`.
+- ⬜ CI для playlist commits `43e29244...` → `2863e662...`.
 
 ## Последние commits
+- `2863e6627d63eb01616273abb1e746e6fef2a436` — Include playlist support in CI compile check.
+- `01846cdfa2dd3a5843cd04d7e1108cb3fffc8685` — Add playlist policy regression tests.
+- `2a61db1862c9d8b7c4d7952afc80e13b43cd25f3` — Wire fair playlist scheduler into bot startup.
+- `172eb87cd23e9a294c073b7adf5437395911faed` — Limit playlist probing to applicable tier.
+- `4e45567f54c9d1a85f70c253d231f321ea01a4d1` — Refine fair playlist limits and guards.
+- `43e29244c081c2ae16ef96d20a76e992d4e754c3` — Add fair bounded playlist support.
 - `59c20fb4ae8183e210c5521c1172640d5f1300a5` — Clear legacy Telegram command menu.
 - `7d76f3cb03917e0a14d8704189151f2ca267c1ae` — Test process wrapper runtime dependencies.
 - `d82cb3c4c2d45f396831ccb9cd2ba16cb06174c9` — Fix process wrapper runtime globals.
@@ -160,7 +190,7 @@
 - `046fbb3efc38873deb07df28ca07249b96a66ac3` — Fix Local Bot API file downloads.
 
 ## Handoff
-1. ⬜ CI для текущего head (`59c20fb4...`).
+1. ⬜ CI для текущего head `2863e662...` / playlist changes.
 2. ⬜ Deploy branch head to VPS и restart `media-hunter.service`.
 3. ⬜ Проверить мобильное меню Telegram — старые команды должны исчезнуть.
 4. ⬜ Проверить `Моё видео`.
@@ -168,5 +198,8 @@
 6. ⬜ Проверить PNG logo и video+logo.
 7. ⬜ Проверить enabled autopost.
 8. ⬜ Проверить, что одинаковый watermark не запускает второй FFmpeg.
-9. ⬜ Улучшить stderr logging FFmpeg.
-10. 🔐 Перевыпустить Bot Token через BotFather из-за раскрытия в логах.
+9. ⬜ Проверить playlist 5–20 видео и fair interleaving с обычными задачами.
+10. ⬜ Проверить playlist >80 MB guard.
+11. ⬜ Проверить free playlist quota: 3 запроса/месяц, 20 видео/запрос.
+12. ⬜ Улучшить stderr logging FFmpeg.
+13. 🔐 Перевыпустить Bot Token через BotFather из-за раскрытия в логах.
