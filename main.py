@@ -17,9 +17,15 @@ from media_hunter_bot import about as _about
 from media_hunter_bot import ux_fixes as _ux_fixes
 from media_hunter_bot import runtime_diagnostics as _runtime_diagnostics
 from media_hunter_bot import pipeline_diagnostics as _pipeline_diagnostics
+from media_hunter_bot import _cached_process_entry
 from aiogram import Bot as _Bot
 
 playlist_support.patch_engine(_handlers.Engine, _handlers)
+# handlers.py imported process_media directly from processor at module import
+# time, so patch that local binding too. The package-level processor patch alone
+# cannot affect an already-imported `from .processor import process_media` name.
+# This is what makes the per-job process cache actually cover autopost calls.
+_handlers.process_media = _cached_process_entry
 _runtime_diagnostics.patch_engine(_handlers.Engine)
 _runtime_diagnostics.patch_bot_downloads(_Bot)
 _pipeline_diagnostics.patch_handlers(_handlers)
