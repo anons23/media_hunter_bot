@@ -24,6 +24,30 @@ def _cached_process_entry(source, work, watermark, audio_only=False, compress=Fa
 _processor._unique_video_filters = _safe_unique_video_filters
 _processor.process_media = _cached_process_entry
 
+# For autopost jobs, the first enabled channel is the source of truth for the
+# watermark used on the video sent back to the user. The exact same processed
+# file is then reused for that first channel, so an old user-level/legacy
+# watermark cannot unexpectedly replace the channel's configured watermark.
+from . import db as _db
+
+_original_get_user_watermark = _db.aget_user_watermark
+
+
+async def _first_channel_watermark(uid):
+    try:
+        channels = await _db.alist_channels(uid)
+        enabled = [ch for ch in channels if bool(ch["enabled"])]
+        if enabled:
+            return await _db.aget_channel_watermark(enabled[0]["channel_id"], uid)
+    except Exception:
+        # Keep the existing user watermark path if channel lookup is not
+        # available during startup/bootstrap or in a degraded DB state.
+        pass
+    return await _original_get_user_watermark(uid)
+
+
+_db.aget_user_watermark = _first_channel_watermark
+
 # Local Bot API returns absolute filesystem paths from getFile(). Tell aiogram
 # to consume those paths locally instead of requesting /file/botTOKEN/<path>.
 # This must happen before handlers.py constructs its AiohttpSession.
