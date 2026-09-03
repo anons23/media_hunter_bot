@@ -150,12 +150,11 @@ def patch_engine(engine_cls, handlers_module) -> None:
 
         safe = validate_source_url(url)
         premium = await db.ais_premium(uid)
-        probe_limit = max(FREE_PLAYLIST_MAX_VIDEOS, MAX_PLAYLIST_ITEMS)
-        items, total = await asyncio.to_thread(inspect_playlist, safe, probe_limit)
+        limit = MAX_PLAYLIST_ITEMS if premium else FREE_PLAYLIST_MAX_VIDEOS
+        items, total = await asyncio.to_thread(inspect_playlist, safe, limit)
         if len(items) <= 1:
             return await original_add(self, uid, url=safe, source=source)
 
-        limit = MAX_PLAYLIST_ITEMS if premium else FREE_PLAYLIST_MAX_VIDEOS
         items = items[:limit]
         if not items:
             raise RuntimeError("Плейлист не содержит доступных видео.")
