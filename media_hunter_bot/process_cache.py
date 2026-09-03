@@ -9,27 +9,48 @@ from typing import Any, Callable
 
 logger = logging.getLogger("media_hunter_bot.process_cache")
 _MAX_ENTRIES = 256
-_cache: dict[tuple[str, str, bool, bool, str], Path] = {}
+_cache: dict[tuple[str, str, bool, bool], Path] = {}
 
 
-def _watermark_key(watermark: Any) -> str:
-    return repr(watermark)
-
-
-def cached_process_media(processor: Callable[..., Path], source: Path, work: Path, watermark: Any, *, audio_only: bool, compress: bool, register: Callable[..., Any]) -> Path:
-    """Run processor once per source/work/watermark/options combination.
+def cached_process_media(
+    processor: Callable[..., Path],
+    source: Path,
+    work: Path,
+    watermark: Any,
+    *,
+    audio_only: bool,
+    compress: bool,
+    register: Callable[..., Any],
+) -> Path:
+    """Process once per source/work/options and reuse the exact result.
 
     The cache is deliberately scoped by the temporary work directory, so a
-    result can only be reused inside the same job. Different watermark
-    profiles (including per-channel profiles) still get independent outputs.
+    result can only be reused inside the same job. Watermark is intentionally
+    NOT part of the key: after the bot has created and sent the user's final
+    video, enabled autopost channels receive that exact same Telegram media
+    instead of triggering another FFmpeg encode. This means channel-specific
+    watermark settings are not applied to autopost copies.
+
+    Different compression modes still get independent outputs because a
+    compression retry may legitimately require another encode.
     """
-    key = (str(source.resolve()), str(work.resolve()), audio_only, compress, _watermark_key(watermark))
+    key = (str(source.resolve()), str(work.resolve()), audio_only, compress)
     cached = _cache.get(key)
     if cached is not None and cached.exists():
-        logger.info("PROCESS_CACHE_HIT work=%s audio_only=%s compress=%s", work, audio_only, compress)
+        logger.info(
+            "PROCESS_CACHE_HIT work=%s audio_only=%s compress=%s",
+            work,
+            audio_only,
+            compress,
+        )
         return cached
 
-    logger.info("PROCESS_CACHE_MISS work=%s audio_only=%s compress=%s", work, audio_only, compress)
+    logger.info(
+        "PROCESS_CACHE_MISS work=%s audio_only=%s compress=%s",
+        work,
+        audio_only,
+        compress,
+    )
     result = processor(
         source,
         work,
