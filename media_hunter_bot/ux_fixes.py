@@ -188,7 +188,7 @@ async def _toggle_autopost(c: CallbackQuery):
         await c.answer("Канал больше не подключён", show_alert=True)
         return
     enabled = not bool(row["enabled"])
-    await db.set_channel_enabled(c.from_user.id, cid, enabled)
+    await db.aset_channel_enabled(c.from_user.id, cid, enabled)
     status = "включён" if enabled else "выключен"
     await c.answer(f"Автопостинг {status}")
     await _edit_or_answer(
