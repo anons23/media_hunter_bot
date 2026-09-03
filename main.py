@@ -11,6 +11,10 @@ load_dotenv(ROOT / ".env")
 
 from media_hunter_bot.config import ensure_directories, validate
 from media_hunter_bot.handlers import main
+from media_hunter_bot import playlist_support
+from media_hunter_bot import handlers as _handlers
+
+playlist_support.patch_engine(_handlers.Engine, _handlers)
 
 
 if __name__ == "__main__":
