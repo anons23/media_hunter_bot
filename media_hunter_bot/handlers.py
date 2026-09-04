@@ -78,6 +78,7 @@ from .processor import (
     validate_logo,
     validate_source_url,
 )
+from .oversize_processor import compress_for_send
 from .progress import ProgressTracker
 from .opp_logic import opp_check
 from .opp_admin import register_opp_admin
@@ -427,7 +428,6 @@ class Engine:
                 raise RuntimeError(f"Исходный файл превышает абсолютный лимит {MAX_SOURCE_DOWNLOAD_MB} МБ")
             fmt = user["format"]
             audio_only = fmt == "mp3"
-            oversized = False
             watermark = await db.aget_user_watermark(j.uid)
             soft_unique_limit = SOFT_UNIQUE_SIZE_MB * 1024 * 1024
             max_unique_limit = MAX_UNIQUE_SIZE_MB * 1024 * 1024
@@ -447,9 +447,16 @@ class Engine:
                     register=register,
                 )
             elif size > max_unique_limit:
-                # >100 МБ и <= абсолютного лимита: только оригинал.
-                result = source
-                oversized = True
+                # >100 МБ и <= абсолютного лимита: uniqueness запрещена,
+                # но оригинал нельзя отправить через 100 MB Telegram ceiling.
+                # Поэтому делаем compression-only копию без unique filter.
+                result = await asyncio.to_thread(
+                    compress_for_send,
+                    source,
+                    work,
+                    watermark,
+                    register,
+                )
             elif size > soft_unique_limit:
                 # >80 МБ и <=100 МБ: уникализация + обязательное сжатие до 80 МБ.
                 result = await asyncio.to_thread(
@@ -480,12 +487,6 @@ class Engine:
 
             meta = await asyncio.to_thread(metadata, source)
             caption = str(meta.get("description") or media_title or meta.get("title") or "")[:900]
-            if oversized:
-                caption += (
-                    f"\n\nℹ️ Файл больше {MAX_UNIQUE_SIZE_MB} МБ, "
-                    "поэтому отправлен оригинал без уникализации."
-                )
-
             result_size = (await asyncio.to_thread(result.stat)).st_size
             if result_size > send_limit:
                 raise RuntimeError(
@@ -501,8 +502,13 @@ class Engine:
                 if not ch["enabled"]:
                     continue
                 try:
-                    if audio_only or oversized:
-                        cr = result if audio_only else source
+                    if audio_only:
+                        cr = result
+                    elif size > max_unique_limit:
+                        # Oversize jobs are compression-only. Reuse the same
+                        # processed result for every enabled channel instead of
+                        # sending the >100 MB source or running uniqueness again.
+                        cr = result
                     else:
                         channel_wm = await db.aget_channel_watermark(ch["channel_id"], j.uid)
                         cr = await asyncio.to_thread(process_media, source, work, channel_wm, audio_only=False, compress=False, register=register)
