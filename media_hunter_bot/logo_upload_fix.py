@@ -93,11 +93,16 @@ def patch_router(router):
     # Register on the complete LogoStates.upload state. This avoids depending
     # on Message.photo's optional content filter and guarantees that a photo
     # received while the wizard is waiting for a logo reaches this handler.
+    # PNG documents remain handled by wm_wizard.logo_upload (F.document).
     @router.message(LogoStates.upload)
     async def _logo_photo_message(message: Message, bot, state):
         if message.photo:
             await _handle_photo(message, bot, state)
-        else:
-            await message.answer("❌ Отправьте изображение логотипа как фото из галереи или PNG-файл.")
+            return
+        if message.document:
+            # Document path is owned by wm_wizard (LogoStates.upload + F.document).
+            # Do not answer here to avoid duplicate replies if both handlers run.
+            return
+        await message.answer("❌ Отправьте изображение логотипа как фото из галереи или PNG-файл.")
 
     router._media_hunter_logo_photo_patched = True
