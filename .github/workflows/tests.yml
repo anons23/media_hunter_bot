@@ -1,6 +1,7 @@
 name: Media Hunter tests
 
 on:
+  # Run regression tests on every push to the active development branch.
   push:
     branches: [Media_hanter-v3-security]
   pull_request:
