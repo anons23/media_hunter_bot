@@ -217,30 +217,31 @@
 - Production smoke подтвердил отдельную логическую ошибку: `handlers.Engine._run_job()` сначала продвигал progress на stage `process` («Уникализация»), а затем для `size > MAX_UNIQUE_SIZE_MB` выбирал `result = source`. После этого общий `send_limit = MAX_SEND_MB = 100 MB` всё равно отклонял исходный файл сообщением `Результат превышает лимит отправки 100 МБ`.
 - То есть ветка «не уникализировать >100 MB» формально существовала, но была несовместима с обязательным Telegram send limit 100 MB: оригинал нельзя было отправить.
 - Новый fix вводит `media_hunter_bot/oversize_processor.py`: для видео >100 MB используется **compression-only** pipeline. Уникальный фильтр не применяется. Битрейт рассчитывается от длительности с запасом, а при необходимости снижается итеративно; watermark сохраняется.
-- `media_hunter_bot/__init__.py` маршрутизирует видео >100 MB напрямую в `compress_for_send()` до `process_cache`/uniqueness pipeline.
+- В `handlers.py` теперь **непосредственно** вызывается `compress_for_send()` для ветки `>100 MB`; autopost этой же категории повторно не запускает uniqueness и использует уже подготовленный результат.
+- `media_hunter_bot/__init__.py` также содержит защитный routing entrypoint для вызовов `process_media` вне `Engine`, но production Engine теперь исправлен в основном месте принятия решения.
 - Видео <=100 MB остаются на прежнем обязательном uniqueness path без ослабления требования.
 - Добавлен regression test `tests/test_oversize_routing.py`.
 - CI compile coverage расширена на `oversize_processor.py`.
-- Commits:
-  - `a98a84449be8a575a905b9724836e5b7534b774a` — compression-only processor.
-  - `88e76b036bc36b789f8608b0ce9ac8c3b732ca66` — >100 MB routing in package processing entrypoint.
-  - `60eb109feeefc3e349aa9d97b1e69e8a30f2081b` — robust logo upload state handler.
-  - `bdfd0e267a56cbb1501216dc868ad71116e48202` — logo registration regression test.
-  - `efb022e4de00b1c5e8be344ec009476e1a8f3710` — >100 MB routing regression test.
-  - `a10fd87926750410e7fcd84c27f68d1093d12124` — CI compile coverage.
-- ⬜ Current CI for this bugfix batch.
+- CI run `33892994401` (`2d552044...`) — ❌ из-за несовместимости нового routing с legacy tests, где `source` передавался строкой.
+- CI run `33893100311` (`3c575bdd...`) — ❌ та же причина в `__init__.py`: `_processor` был удалён после bootstrap, но runtime wrapper обращался к нему.
+- Исправление: routing использует `pathlib.Path(source)` до проверки существования; legacy string-call tests снова поддерживаются.
+- CI run `33893116282` (`036bcf3...`) — ✅ Compile + Regression tests.
+- Финальная правка `handlers.py` commit: `1527d12053d9553ec474c104ed8e4762feaaf5cd`.
+- Финальная правка `__init__.py` commit: `ac8250ed5e69a54a86d6ea9b83d6005d6d1ab1ef`.
+- Финальная logo fix commit: `60eb109feeefc3e349aa9d97b1e69e8a30f2081b`; registration test `bdfd0e267a56cbb1501216dc868ad71116e48202`.
+- ⬜ CI после финальной правки `handlers.py`/`__init__.py`.
 - ⬜ VPS deployment and production smoke for both fixes.
 
 ## Handoff / текущий статус
 1. Branch: `Media_hanter-v3-security`.
-2. Bugfix batch commits are present on the branch; latest code commit before this journal update: `a10fd87926750410e7fcd84c27f68d1093d12124`.
+2. Latest code commits before this journal update: `1527d12053d9553ec474c104ed8e4762feaaf5cd` (`handlers.py`) and `ac8250ed5e69a54a86d6ea9b83d6005d6d1ab1ef` (`__init__.py`), with journal update after them.
 3. Logo upload now has a state-wide handler rather than relying on `F.photo` alone.
 4. Videos >100 MB now bypass uniqueness and use compression-only processing to fit the send ceiling.
 5. Videos <=100 MB remain mandatory uniqueness processed.
-6. ⬜ Current CI must pass before production deployment.
-7. ⬜ After CI: update VPS, restart `media-hunter.service`, verify status.
+6. CI `33893116282` for the pre-final code is green; final handler commit still needs CI confirmation.
+7. ⬜ After final CI: update VPS, restart `media-hunter.service`, verify status.
 8. ⬜ Smoke logo: normal gallery photo → settings → save → verify persisted logo.
-9. ⬜ Smoke >100 MB video: must not report uniqueness failure; must compress/send successfully when technically possible within the configured absolute source limit.
+9. ⬜ Smoke >100 MB video: must not report uniqueness failure; must compress/send successfully within the configured absolute source limit.
 10. ⬜ Verify old `Мой канал` watermark is not applied.
 11. ⬜ Verify 1-channel autopost uses exact same processed file / no second FFmpeg.
 12. ⬜ Multi-channel: verify `UNIQUE_BASE_CREATE` once and channel variants without repeated uniqueness.
