@@ -15,8 +15,9 @@ def _cached_process_entry(source, work, watermark, audio_only=False, compress=Fa
     # Videos above the 100 MB uniqueness ceiling must NOT be unique-processed.
     # They still need a sendable copy because Telegram upload is capped at the
     # configured MAX_SEND_MB. Use the dedicated compression-only pipeline.
-    if not audio_only and source.stat().st_size > MAX_UNIQUE_SIZE_MB * 1024 * 1024:
-        return _compress_for_send(source, work, watermark, register)
+    source_path = _processor.Path(source) if hasattr(_processor, "Path") else __import__("pathlib").Path(source)
+    if not audio_only and source_path.stat().st_size > MAX_UNIQUE_SIZE_MB * 1024 * 1024:
+        return _compress_for_send(source_path, work, watermark, register)
     return _cached_process_media(
         _optimized_process_media,
         source,
