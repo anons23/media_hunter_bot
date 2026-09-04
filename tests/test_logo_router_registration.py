@@ -6,7 +6,7 @@ from media_hunter_bot import logo_upload_fix
 
 
 class TestLogoRouterRegistration(unittest.TestCase):
-    def test_photo_handler_is_registered_on_router(self):
+    def test_logo_upload_state_handler_is_registered_on_router(self):
         router = Router()
         logo_upload_fix.patch_router(router)
         handlers = getattr(router.message, "handlers", [])
