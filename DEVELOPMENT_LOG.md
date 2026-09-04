@@ -145,7 +145,7 @@
 - Playlist video source limit: 80 MB; при известном размере >80 MB загрузка не начинается; неизвестный размер проверяется после загрузки до FFmpeg.
 - Обычные URL и `Моё видео` не получили новый 80 MB лимит.
 - Continuation state в памяти; restart/cancel останавливает продолжение.
-- ⬜ Production smoke: playlist 5–20 видео, Premium 40, fair interleaving, >80 MB guard, free monthly quota.
+- ⬜ Production smoke: playlist 5–20 видео, fair interleaving, >80 MB guard, free monthly quota.
 
 ## Тарифы / каналы
 - Free: **1 канал**, **20 playlist-видео/request**, **3 playlist requests/month**.
@@ -204,18 +204,46 @@
 - Commit: `3fb66ea96979ad275aa8e7b84437d7a48c5eab1a`.
 - ⬜ Новый CI для текущей головы после всех этих изменений.
 
+## Bugfix audit — 2026-09-04
+### Logo upload
+- Production smoke повторно подтвердил проблему: после входа в `LogoStates.upload` обычные photo updates приходили как `Update ... is not handled`.
+- Аудит ветки подтвердил, что legacy `wm_wizard.py` действительно регистрирует только `LogoStates.upload + F.document`; photo path был вынесен в `logo_upload_fix.py`.
+- Предыдущая архитектура была хрупкой: photo handler подключался отдельным bootstrap patch, а ошибка импорта/регистрации в `media_hunter_bot/__init__.py` проглатывалась через `except Exception: pass`. Поэтому отсутствие handler могло выглядеть как полностью «тихая» проблема.
+- Новый fix: `logo_upload_fix.py` регистрирует обработчик на **весь `LogoStates.upload` state**, а не только через `F.photo`. Если в состоянии пришло фото — оно проходит полный download → FFmpeg JPEG→PNG → validate → FSM settings → сохранение. Для неподдерживаемого сообщения бот теперь отвечает пользователю вместо молчания.
+- Добавлена проверка фактической регистрации state-handler.
+- ⬜ Production smoke: обычное фото из галереи → экран настроек → сохранить → проверить файл в `data/logos`.
+
+### Videos >100 MB
+- Production smoke подтвердил отдельную логическую ошибку: `handlers.Engine._run_job()` сначала продвигал progress на stage `process` («Уникализация»), а затем для `size > MAX_UNIQUE_SIZE_MB` выбирал `result = source`. После этого общий `send_limit = MAX_SEND_MB = 100 MB` всё равно отклонял исходный файл сообщением `Результат превышает лимит отправки 100 МБ`.
+- То есть ветка «не уникализировать >100 MB» формально существовала, но была несовместима с обязательным Telegram send limit 100 MB: оригинал нельзя было отправить.
+- Новый fix вводит `media_hunter_bot/oversize_processor.py`: для видео >100 MB используется **compression-only** pipeline. Уникальный фильтр не применяется. Битрейт рассчитывается от длительности с запасом, а при необходимости снижается итеративно; watermark сохраняется.
+- `media_hunter_bot/__init__.py` маршрутизирует видео >100 MB напрямую в `compress_for_send()` до `process_cache`/uniqueness pipeline.
+- Видео <=100 MB остаются на прежнем обязательном uniqueness path без ослабления требования.
+- Добавлен regression test `tests/test_oversize_routing.py`.
+- CI compile coverage расширена на `oversize_processor.py`.
+- Commits:
+  - `a98a84449be8a575a905b9724836e5b7534b774a` — compression-only processor.
+  - `88e76b036bc36b789f8608b0ce9ac8c3b732ca66` — >100 MB routing in package processing entrypoint.
+  - `60eb109feeefc3e349aa9d97b1e69e8a30f2081b` — robust logo upload state handler.
+  - `bdfd0e267a56cbb1501216dc868ad71116e48202` — logo registration regression test.
+  - `efb022e4de00b1c5e8be344ec009476e1a8f3710` — >100 MB routing regression test.
+  - `a10fd87926750410e7fcd84c27f68d1093d12124` — CI compile coverage.
+- ⬜ Current CI for this bugfix batch.
+- ⬜ VPS deployment and production smoke for both fixes.
+
 ## Handoff / текущий статус
 1. Branch: `Media_hanter-v3-security`.
-2. Latest code head before this journal commit: `4c51f6074dabe2f381698ffe419a9f00ba805b48` plus subsequent test/CI commits `7199f879ca07bf24a579c720cf40b968cdd5a383`, `c2e89c89ae0bcd4d66e12130d6d6e2444567c6c6`, `3fb66ea96979ad275aa8e7b84437d7a48c5eab1a`, and this journal update.
-3. Photo handler is now registered from the watermark wizard bootstrap itself via package initialization, not only from root `main.py`.
-4. Logo watermark size/opacity is now applied in the cached processor path as well.
-5. ⬜ Current CI must pass before production deployment.
-6. ⬜ After CI: update VPS, restart `media-hunter.service`, and verify `systemctl status`.
-7. ⬜ Smoke: open watermark → logo → send normal gallery photo → settings screen must appear.
-8. ⬜ Smoke: save logo → process short video → verify logo is actually visible with selected size/opacity/position.
-9. ⬜ Verify old `Мой канал` watermark is not applied.
-10. ⬜ Verify 1-channel autopost uses exact same processed file / no second FFmpeg.
-11. ⬜ Multi-channel: verify `UNIQUE_BASE_CREATE` once and channel variants without repeated uniqueness.
-12. ⬜ Playlist smoke: 5–20 videos, fair interleaving, 80 MB guard, Free quota, Premium 40.
-13. ⬜ Premium/free channel-limit smoke.
-14. Never record bot tokens or `.env` contents in this journal.
+2. Bugfix batch commits are present on the branch; latest code commit before this journal update: `a10fd87926750410e7fcd84c27f68d1093d12124`.
+3. Logo upload now has a state-wide handler rather than relying on `F.photo` alone.
+4. Videos >100 MB now bypass uniqueness and use compression-only processing to fit the send ceiling.
+5. Videos <=100 MB remain mandatory uniqueness processed.
+6. ⬜ Current CI must pass before production deployment.
+7. ⬜ After CI: update VPS, restart `media-hunter.service`, verify status.
+8. ⬜ Smoke logo: normal gallery photo → settings → save → verify persisted logo.
+9. ⬜ Smoke >100 MB video: must not report uniqueness failure; must compress/send successfully when technically possible within the configured absolute source limit.
+10. ⬜ Verify old `Мой канал` watermark is not applied.
+11. ⬜ Verify 1-channel autopost uses exact same processed file / no second FFmpeg.
+12. ⬜ Multi-channel: verify `UNIQUE_BASE_CREATE` once and channel variants without repeated uniqueness.
+13. ⬜ Playlist smoke: 5–20 videos, fair interleaving, 80 MB guard, Free quota, Premium 40.
+14. ⬜ Premium/free channel-limit smoke.
+15. Never record bot tokens or `.env` contents in this journal.
