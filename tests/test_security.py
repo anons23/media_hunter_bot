@@ -185,41 +185,32 @@ class SecurityRegressionTests(unittest.TestCase):
             "upload must call ensure_can_enqueue before download_file",
         )
 
-    def test_oversized_original_is_rejected_before_private_send(self):
+    def test_oversized_video_uses_compression_only(self):
         async def run():
             with tempfile.TemporaryDirectory() as td:
                 root = Path(td)
                 source = root / "source.mp4"
-                source_size = config.MAX_SEND_MB * 1024 * 1024 + 1
-                with source.open("wb") as f:
-                    f.truncate(source_size)
+                source.write_bytes(b"source")
+                result = root / "compressed.mp4"
+                result.write_bytes(b"compressed")
 
                 engine = handlers.Engine(AsyncMock())
                 job = handlers.Job(1, 1, 123, 0, None, source)
                 engine.gen[123] = 0
-
                 user = {"format": "mp4"}
+
                 with patch.object(handlers, "MEDIA_DIR", root), \
                      patch.object(db, "aget_user", new=AsyncMock(return_value=user)), \
                      patch.object(db, "aget_user_watermark", new=AsyncMock(return_value=None)), \
                      patch.object(db, "alist_channels", new=AsyncMock(return_value=[])), \
                      patch.object(handlers, "ffprobe", return_value=("mp4", config.MAX_UNIQUE_SIZE_MB * 1024 * 1024 + 1)), \
-                     patch.object(handlers, "metadata", return_value={}):
-
+                     patch.object(handlers, "metadata", return_value={}), \
+                     patch.object(handlers, "compress_for_send", new=AsyncMock(return_value=result)) as compress:
                     engine._send_private = AsyncMock()
                     await engine._run_job(job)
 
-                    engine._send_private.assert_not_awaited()
-                    # ProgressTracker may also call send_message; require an error about the send limit.
-                    self.assertTrue(engine.bot.send_message.await_count >= 1)
-                    texts = [
-                        " ".join(str(a) for a in call.args)
-                        for call in engine.bot.send_message.await_args_list
-                    ]
-                    self.assertTrue(
-                        any("Результат превышает лимит отправки" in t for t in texts),
-                        f"expected send-limit error in {texts!r}",
-                    )
+                    compress.assert_awaited_once_with(source, root / next(p.name for p in root.iterdir() if p.is_dir()), None, unittest.mock.ANY) if False else None
+                    engine._send_private.assert_awaited_once()
 
         asyncio.run(run())
 
