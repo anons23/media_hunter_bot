@@ -205,11 +205,11 @@ class SecurityRegressionTests(unittest.TestCase):
                      patch.object(db, "alist_channels", new=AsyncMock(return_value=[])), \
                      patch.object(handlers, "ffprobe", return_value=("mp4", config.MAX_UNIQUE_SIZE_MB * 1024 * 1024 + 1)), \
                      patch.object(handlers, "metadata", return_value={}), \
-                     patch.object(handlers, "compress_for_send", new=AsyncMock(return_value=result)) as compress:
+                     patch.object(handlers, "compress_for_send", return_value=result) as compress:
                     engine._send_private = AsyncMock()
                     await engine._run_job(job)
 
-                    compress.assert_awaited_once_with(source, root / next(p.name for p in root.iterdir() if p.is_dir()), None, unittest.mock.ANY) if False else None
+                    compress.assert_called_once()
                     engine._send_private.assert_awaited_once()
 
         asyncio.run(run())
