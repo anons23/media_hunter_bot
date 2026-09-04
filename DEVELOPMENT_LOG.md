@@ -142,18 +142,26 @@
 - ⬜ CI для этого нового production fix.
 - ⬜ VPS deployment/smoke: после обновления обязательно повторить >100 MB тест и logo upload.
 
+## Logo upload still unresolved — 2026-09-04
+- После deployment на VPS и полного `stop` → проверка процессов/временных файлов → `start` сервис работает штатно, но **загрузка логотипа обычным фото по-прежнему не работает**: пользователь подтвердил, что ничего не изменилось.
+- VPS подтверждён на commit `f1fad33` (`ec22e09` + journal fix), `media-hunter.service` активен, polling запускается без ошибок.
+- Это означает, что предыдущая гипотеза «достаточно state-wide `LogoStates.upload` handler + bootstrap patch» **не подтверждена production**.
+- В журнале проблема остаётся `⬜` и требует повторного аудита фактической регистрации router/handler, порядка подключённых routers, FSM state, а также реального update, который приходит от Telegram при отправке фото.
+- Не отмечать logo upload как исправленный до фактического production smoke: фото → handler → файл в `data/logos` → settings → save → watermark на видео.
+- Current production status: **service healthy, logo upload ❌ unresolved**.
+
 ## Current handoff / status
 1. Branch: `Media_hanter-v3-security`.
 2. **CI verification: ✅ green run `33895607263` (#268)** для предыдущего oversize test fix.
 3. `<=100 MB`: mandatory uniqueness preserved.
 4. `>100 MB`: compression-only path, latest convergence fix `ec22e099...` ожидает CI.
-5. Logo upload: state-wide handler fix; ⬜ production smoke.
+5. Logo upload: **❌ production unresolved**; state-wide handler fix did not change observed behavior after clean restart.
 6. Legacy `Мой канал`: one-shot cleanup guard; ⬜ production verification.
 7. 1-channel autopost: exact-copy/no second FFmpeg; ⬜ production verification.
 8. Multi-channel autopost: frozen unique base + watermark variants; ⬜ production verification.
 9. Playlist: fairness/80 MB/quota logic implemented; ⬜ production smoke.
 10. Free/Premium channel limits implemented; ⬜ production smoke.
-11. **VPS has not been marked deployed/verified by the assistant.**
+11. VPS service: **✅ healthy after clean stop/start; production logo smoke remains ❌.**
 
 ## VPS deployment commands
 ```bash
