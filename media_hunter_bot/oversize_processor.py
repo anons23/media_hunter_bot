@@ -61,15 +61,16 @@ def compress_for_send(
     limit = MAX_SEND_MB * 1024 * 1024
     duration = _duration_seconds(source)
 
-    # Keep ~5% headroom for container overhead and use 96 kbps AAC audio.
-    target_total_bps = int((limit * 8 * 0.95) / duration)
-    audio_bps = 96_000
-    video_bps = max(80_000, target_total_bps - audio_bps)
+    # Keep ~8% headroom for container overhead. Audio is deliberately modest
+    # so very long videos still have enough budget for the video stream.
+    target_total_bps = int((limit * 8 * 0.92) / duration)
+    audio_bps = min(64_000, max(24_000, target_total_bps // 8))
+    video_bps = max(8_000, target_total_bps - audio_bps)
 
     logo = base._logo_path(watermark) if watermark.get("type") == "image" else None
     has_text = watermark.get("type") == "text" and bool(watermark.get("text"))
 
-    for attempt in range(4):
+    for attempt in range(8):
         output = work_dir / f"oversize_send_{attempt}.mp4"
         output.unlink(missing_ok=True)
         cmd = ["ffmpeg", "-y", "-i", str(source)]
@@ -80,7 +81,7 @@ def compress_for_send(
             "-threads", "2",
             "-b:v", str(video_bps),
             "-maxrate", str(video_bps),
-            "-bufsize", str(video_bps * 2),
+            "-bufsize", str(max(video_bps * 2, 16_000)),
             "-c:a", "aac",
             "-b:a", str(audio_bps),
             "-movflags", "+faststart",
@@ -114,6 +115,12 @@ def compress_for_send(
                 source.name, result.name, result.stat().st_size, attempt + 1,
             )
             return result
-        video_bps = max(60_000, int(video_bps * 0.72))
+
+        # Real encodes can overshoot the nominal bitrate because of container
+        # overhead and stream variability. Re-encode progressively lower until
+        # the hard Telegram ceiling is met. The low floor is intentional: the
+        # alternative is returning an un-sendable >100 MB source.
+        video_bps = max(4_000, int(video_bps * 0.65))
+        audio_bps = max(16_000, int(audio_bps * 0.85))
 
     raise RuntimeError(f"Не удалось сжать видео до лимита отправки {MAX_SEND_MB} МБ")
