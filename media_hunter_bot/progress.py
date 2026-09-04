@@ -12,7 +12,8 @@ class ProgressTracker:
     LABELS = {
         "download": "Скачивание",
         "analyze": "Анализ файла",
-        "process": "Уникализация",
+        # Covers uniqueness (<=100 MB) and compression-only (>100 MB).
+        "process": "Обработка",
         "send": "Отправка",
     }
 
