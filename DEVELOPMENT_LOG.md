@@ -6,7 +6,7 @@
 
 ## Правила
 1. Всегда работать в `Media_hanter-v3-security`.
-2. Перед правкой читать журнал и проверять текущий код.
+2. Перед правкой читать этот журнал и проверять текущий код.
 3. Не менять архитектуру без необходимости.
 4. После каждой правки кода запускать CI/тесты.
 5. После правки дописывать сюда что изменено, почему, CI-результат и что осталось `⬜`.
@@ -106,7 +106,7 @@
 ## Logo upload fix — 2026-09-04
 - Причина production silence: legacy wizard принимал только `LogoStates.upload + F.document`, а обычная gallery photo приходит как `Message.photo`.
 - `logo_upload_fix.py` теперь регистрирует **state-wide handler `LogoStates.upload`**: photo проходит download → JPEG→PNG → validate → FSM settings → save; неподдерживаемое сообщение получает ответ вместо silent ignore.
-- Bootstrap дополнительно гарантируется через package initialization, потому что production entrypoint `/opt/mediahunter/venv/bin/python /opt/mediahunter/app/main.py`/поддерживаемые bootstrap paths должны получить patch независимо от порядка импортов.
+- Bootstrap дополнительно гарантируется через package initialization, потому что production entrypoint `/opt/mediahunter/venv/bin/python /opt/mediahunter/app/main.py` должен получить patch независимо от порядка импортов.
 - Commit: `60eb109feeefc3e349aa9d97b1e69e8a30f2081b`.
 - Registration test: `bdfd0e267a56cbb1501216dc868ad71116e48202`.
 - Logo rendering regression tests добавлены; logo size/opacity теперь применяются непосредственно в optimized FFmpeg graph.
@@ -130,21 +130,30 @@
 - Job `tests` `101097388680` — Compile ✅, Regression tests ✅, весь job success.
 - Это подтверждает текущий набор тестов после oversized-video test mock fix.
 - Временный `CI_TRIGGER.md` после проверки удалён commit `facec9f54e46f2a206b4fcc461f397a51da60316`.
-- Draft PR #1 закрыт, не merge. Тестовый branch `ci-trigger-test` остаётся только техническим артефактом и не содержит production merge.
+- Draft PR #1 закрыт, не merge. Тестовый branch `ci-trigger-test` остаётся только техническим артефактом.
 - Workflow `.github/workflows/tests.yml` запускается на push/PR ветки `Media_hanter-v3-security`, плюс `workflow_dispatch`; compile включает `oversize_processor.py` и runtime patch modules.
+
+## Oversize compression convergence fix — 2026-09-04
+- Production smoke показал новый edge case: `>100 MB` доходил до compression-only, но для некоторых видео четыре попытки всё ещё не укладывались в жёсткий Telegram ceiling.
+- Причина в слишком высоком нижнем пороге `video_bps` (`60 kbps`) и всего четырёх итерациях.
+- `oversize_processor.py` теперь использует меньший audio budget (24–64 kbps), стартовый запас 8%, до **8 итераций**, постепенно снижает video/audio bitrate до минимального безопасного уровня и продолжает compression-only без uniqueness.
+- Цель — не вернуть исходный >100 MB файл никогда; если исходник нельзя уникализировать по правилу >100 MB, он должен быть ужат до send ceiling.
+- Commit: `ec22e09952962b08cc06acb45e2b39f383cede18`.
+- ⬜ CI для этого нового production fix.
+- ⬜ VPS deployment/smoke: после обновления обязательно повторить >100 MB тест и logo upload.
 
 ## Current handoff / status
 1. Branch: `Media_hanter-v3-security`.
-2. **CI verification: ✅ green run `33895607263` (#268).**
+2. **CI verification: ✅ green run `33895607263` (#268)** для предыдущего oversize test fix.
 3. `<=100 MB`: mandatory uniqueness preserved.
-4. `>100 MB`: compression-only path to fit 100 MB send ceiling.
-5. Logo upload: state-wide state handler fix; ⬜ production smoke.
+4. `>100 MB`: compression-only path, latest convergence fix `ec22e099...` ожидает CI.
+5. Logo upload: state-wide handler fix; ⬜ production smoke.
 6. Legacy `Мой канал`: one-shot cleanup guard; ⬜ production verification.
 7. 1-channel autopost: exact-copy/no second FFmpeg; ⬜ production verification.
 8. Multi-channel autopost: frozen unique base + watermark variants; ⬜ production verification.
 9. Playlist: fairness/80 MB/quota logic implemented; ⬜ production smoke.
 10. Free/Premium channel limits implemented; ⬜ production smoke.
-11. **VPS has not been marked deployed/verified by the assistant.** Deployment must be performed and checked on the real VPS.
+11. **VPS has not been marked deployed/verified by the assistant.**
 
 ## VPS deployment commands
 ```bash
