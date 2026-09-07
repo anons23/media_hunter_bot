@@ -8,11 +8,14 @@ social-media sources; bitstream is still re-encoded (not an exact duplicate).
 """
 from __future__ import annotations
 
+import json
+import random
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
 from . import processor as base
+from .unique_filter import unique_video_filters
 
 # Soft audio uniqueization: new AAC bitstream + tiny spectral change.
 # Does NOT guarantee bypass of platform Content ID; aims for quality + non-identical stream.
@@ -26,14 +29,62 @@ _MP3_BITRATE = "192k"
 
 
 def _unique_video_filters() -> str:
-    """Lightweight visual fingerprint with H.264-safe even dimensions."""
-    return (
-        "scale=trunc(iw*0.998/2)*2:trunc(ih*0.998/2)*2,"
-        "eq=contrast=1.012:brightness=0.004:saturation=1.015"
+    """Return a safe, lightly varied visual uniqueness filter."""
+    return unique_video_filters()
+
+
+def _validate_processed_media(path: Path, audio_only: bool) -> None:
+    """Validate that FFmpeg produced a usable media file before delivery."""
+    if not path.exists() or path.stat().st_size <= 0:
+        base.logger.warning("processed output missing or empty: %s", path)
+        raise RuntimeError("Обработанный файл не создан или пуст.")
+
+    proc = subprocess.run(
+        [
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_format", "-show_streams", str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
+    if proc.returncode != 0:
+        base.logger.warning("ffprobe validation failed (code=%s): %s", proc.returncode, proc.stderr[-2000:])
+        raise RuntimeError("Обработанный файл не прошёл проверку FFmpeg.")
+    try:
+        info = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        base.logger.warning("ffprobe validation returned invalid JSON for %s", path)
+        raise RuntimeError("Обработанный файл не прошёл проверку FFmpeg.")
+
+    streams = info.get("streams") or []
+    kind = "audio" if audio_only else "video"
+    matching = [stream for stream in streams if stream.get("codec_type") == kind]
+    if not matching:
+        base.logger.warning("ffprobe validation found no %s stream: %s", kind, path)
+        raise RuntimeError("Обработанный файл не содержит ожидаемый медиапоток.")
+
+    try:
+        duration = float((info.get("format") or {}).get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0
+    if duration <= 0:
+        base.logger.warning("ffprobe validation found invalid duration=%s: %s", duration, path)
+        raise RuntimeError("Обработанный файл имеет некорректную длительность.")
+
+    if not audio_only:
+        stream = matching[0]
+        try:
+            width = int(stream.get("width") or 0)
+            height = int(stream.get("height") or 0)
+        except (TypeError, ValueError):
+            width = height = 0
+        if width <= 0 or height <= 0 or width % 2 or height % 2:
+            base.logger.warning("ffprobe validation found invalid dimensions=%sx%s: %s", width, height, path)
+            raise RuntimeError("Обработанный файл имеет некорректные размеры кадра.")
 
 
-def _run_ffmpeg(cmd: list[str], output: Path, work_dir: Path, register: Callable[[Any], None]) -> Path:
+def _run_ffmpeg(cmd: list[str], output: Path, work_dir: Path, register: Callable[[Any], None], audio_only: bool = False) -> Path:
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
         register(proc)
         try:
@@ -49,9 +100,7 @@ def _run_ffmpeg(cmd: list[str], output: Path, work_dir: Path, register: Callable
             err_text = stderr.decode("utf-8", "replace")
             base.logger.warning("ffmpeg failed (code=%s): %s", proc.returncode, err_text[-2000:])
             raise RuntimeError("Не удалось обработать медиа. Файл повреждён или формат не поддерживается.")
-    if not output.exists():
-        base.logger.warning("ffmpeg finished but output missing in %s", work_dir)
-        raise RuntimeError("Не удалось обработать медиа. Результат не получен.")
+    _validate_processed_media(output, audio_only)
     return output
 
 
@@ -74,7 +123,7 @@ def process_media(
             "-af", _UNIQUE_AUDIO_FILTER,
             "-threads", "1", str(output),
         ]
-        return _run_ffmpeg(cmd, output, work_dir, register)
+        return _run_ffmpeg(cmd, output, work_dir, register, audio_only=True)
 
     logo = base._logo_path(watermark) if watermark.get("type") == "image" else None
     has_text = watermark.get("type") == "text" and bool(watermark.get("text"))
@@ -104,7 +153,6 @@ def process_media(
             f"[logo0][base]scale2ref=w=main_w*{pct:.4f}:h=main_h*{pct:.4f}:force_original_aspect_ratio=decrease[logo][base2];"
             f"[base2][logo]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
         )
-        # Soft af on mapped source audio (all uniqueness paths).
         cmd += [
             "-filter_complex", fc,
             "-map", "[v]",
@@ -135,10 +183,8 @@ def apply_watermark(
     if not watermark or not watermark.get("type"):
         return source
 
-    import hashlib
-    import json
-
     profile = json.dumps(watermark, ensure_ascii=False, sort_keys=True, default=str)
+    import hashlib
     suffix = hashlib.sha1(profile.encode("utf-8")).hexdigest()[:12]
     output = work_dir / f"watermark_{suffix}.mp4"
     if output.exists():
@@ -187,4 +233,4 @@ def apply_watermark(
         return source
     cmd.append(str(output))
     base.logger.info("WATERMARK_VARIANT_CREATE work=%s file=%s", work_dir, output.name)
-    return _run_ffmpeg(cmd, output, work_dir, register)
+    return _run_ffmpeg(cmd, output, work_dir, register, audio_only=False)
