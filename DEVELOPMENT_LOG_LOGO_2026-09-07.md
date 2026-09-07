@@ -9,8 +9,11 @@ Production smoke testing after the uniqueness update showed that video processin
 - The fallback listens for photo messages, checks the current FSM state, and only processes the message when the state is exactly `LogoStates.upload`.
 - Ordinary user photos are not consumed: the handler raises aiogram `SkipHandler` outside the logo-upload state.
 - The existing PNG-document path remains unchanged.
-- Wired the fallback from the production `main.py` bootstrap.
+- Wired the fallback from the production bootstrap path in `media_hunter_bot/__init__.py` as well as root `main.py`.
 - Added registration/idempotency regression tests in `tests/test_logo_photo_fallback.py`.
+
+### Root cause confirmed
+The production systemd entrypoint runs `media_hunter_bot.handlers:main`. Therefore relying only on root `main.py` for fallback registration is insufficient. The package bootstrap now registers the fallback when the watermark wizard itself is registered, while the registration remains idempotent so root `main.py` can also call it safely.
 
 ### Scope safety
 - No uniqueness filters, queue limits, tariff limits, autopost cache logic, or watermark rendering were changed by this fix.
@@ -19,5 +22,5 @@ Production smoke testing after the uniqueness update showed that video processin
 ### Production verification pending
 After CI passes, deploy the branch to VPS and smoke-test:
 1. Watermark → Logo → send a normal gallery photo.
-2. Confirm the bot responds with logo settings instead of `Update ... is not handled`.
+2. Confirm the bot responds with logo settings and the log contains `LOGO_PHOTO_FALLBACK uid=...` instead of `Update ... is not handled`.
 3. Save the logo and process a video to confirm the watermark is rendered.
