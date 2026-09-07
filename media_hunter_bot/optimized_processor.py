@@ -2,6 +2,9 @@
 
 Keeps uniqueness for every video handled by the <=100 MB path while
 avoiding the expensive unsharp/noise filters and unlimited encoder threads.
+
+Audio: AAC 192k + soft filters (not copy). Quality stays close to typical
+social-media sources; bitstream is still re-encoded (not an exact duplicate).
 """
 from __future__ import annotations
 
@@ -10,6 +13,16 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import processor as base
+
+# Soft audio uniqueization: new AAC bitstream + tiny spectral change.
+# Does NOT guarantee bypass of platform Content ID; aims for quality + non-identical stream.
+_UNIQUE_AUDIO_FILTER = (
+    "volume=1.02,"
+    "highpass=f=40,"
+    "lowpass=f=16000"
+)
+_AUDIO_BITRATE = "192k"
+_MP3_BITRATE = "192k"
 
 
 def _unique_video_filters() -> str:
@@ -55,7 +68,10 @@ def process_media(
     if audio_only:
         output = work_dir / "output.mp3"
         cmd = [
-            "ffmpeg", "-y", "-i", str(source), "-vn", "-ar", "44100", "-ac", "2",
+            "ffmpeg", "-y", "-i", str(source),
+            "-vn", "-ar", "44100", "-ac", "2",
+            "-c:a", "libmp3lame", "-b:a", _MP3_BITRATE,
+            "-af", _UNIQUE_AUDIO_FILTER,
             "-threads", "1", str(output),
         ]
         return _run_ffmpeg(cmd, output, work_dir, register)
@@ -70,7 +86,9 @@ def process_media(
         "-c:v", "libx264",
         "-threads", "2",
         "-c:a", "aac",
-        "-b:a", "128k",
+        "-b:a", _AUDIO_BITRATE,
+        "-ar", "48000",
+        "-ac", "2",
         "-movflags", "+faststart",
         "-map_metadata", "-1",
         "-metadata", "comment=media_hunter",
@@ -86,14 +104,21 @@ def process_media(
             f"[logo0][base]scale2ref=w=main_w*{pct:.4f}:h=main_h*{pct:.4f}:force_original_aspect_ratio=decrease[logo][base2];"
             f"[base2][logo]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
         )
-        cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a?", "-shortest"]
+        # Soft af on mapped source audio (all uniqueness paths).
+        cmd += [
+            "-filter_complex", fc,
+            "-map", "[v]",
+            "-map", "0:a?",
+            "-af", _UNIQUE_AUDIO_FILTER,
+            "-shortest",
+        ]
     else:
         vf_parts = [base_vf]
         if has_text:
             text_filter = base._build_text_filter(watermark, work_dir)
             if text_filter:
                 vf_parts.append(text_filter)
-        cmd += ["-vf", ",".join(vf_parts), "-af", "volume=1.01"]
+        cmd += ["-vf", ",".join(vf_parts), "-af", _UNIQUE_AUDIO_FILTER]
     cmd.append(str(output))
     return _run_ffmpeg(cmd, output, work_dir, register)
 
@@ -129,7 +154,9 @@ def apply_watermark(
         "-c:v", "libx264",
         "-threads", "2",
         "-c:a", "aac",
-        "-b:a", "128k",
+        "-b:a", _AUDIO_BITRATE,
+        "-ar", "48000",
+        "-ac", "2",
         "-movflags", "+faststart",
         "-map_metadata", "-1",
         "-metadata", "comment=media_hunter",
@@ -144,12 +171,18 @@ def apply_watermark(
             f"[logo0][0:v]scale2ref=w=main_w*{pct:.4f}:h=main_h*{pct:.4f}:force_original_aspect_ratio=decrease[logo][base];"
             f"[base][logo]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
         )
-        cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a?", "-shortest"]
+        cmd += [
+            "-filter_complex", fc,
+            "-map", "[v]",
+            "-map", "0:a?",
+            "-af", _UNIQUE_AUDIO_FILTER,
+            "-shortest",
+        ]
     elif has_text:
         text_filter = base._build_text_filter(watermark, work_dir)
         if not text_filter:
             return source
-        cmd += ["-vf", text_filter, "-af", "volume=1.01"]
+        cmd += ["-vf", text_filter, "-af", _UNIQUE_AUDIO_FILTER]
     else:
         return source
     cmd.append(str(output))
