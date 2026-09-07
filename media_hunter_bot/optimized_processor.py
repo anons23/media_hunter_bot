@@ -8,8 +8,8 @@ social-media sources; bitstream is still re-encoded (not an exact duplicate).
 """
 from __future__ import annotations
 
+import hashlib
 import json
-import random
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -17,13 +17,7 @@ from typing import Any, Callable
 from . import processor as base
 from .unique_filter import unique_video_filters
 
-# Soft audio uniqueization: new AAC bitstream + tiny spectral change.
-# Does NOT guarantee bypass of platform Content ID; aims for quality + non-identical stream.
-_UNIQUE_AUDIO_FILTER = (
-    "volume=1.02,"
-    "highpass=f=40,"
-    "lowpass=f=16000"
-)
+_UNIQUE_AUDIO_FILTER = "volume=1.02,highpass=f=40,lowpass=f=16000"
 _AUDIO_BITRATE = "192k"
 _MP3_BITRATE = "192k"
 
@@ -40,10 +34,7 @@ def _validate_processed_media(path: Path, audio_only: bool) -> None:
         raise RuntimeError("Обработанный файл не создан или пуст.")
 
     proc = subprocess.run(
-        [
-            "ffprobe", "-v", "quiet", "-print_format", "json",
-            "-show_format", "-show_streams", str(path),
-        ],
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", str(path)],
         capture_output=True,
         text=True,
         timeout=60,
@@ -84,7 +75,7 @@ def _validate_processed_media(path: Path, audio_only: bool) -> None:
             raise RuntimeError("Обработанный файл имеет некорректные размеры кадра.")
 
 
-def _run_ffmpeg(cmd: list[str], output: Path, work_dir: Path, register: Callable[[Any], None], audio_only: bool = False) -> Path:
+def _run_ffmpeg(cmd: list[str], output: Path, work_dir: Path, register: Callable[[Any], None]) -> Path:
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
         register(proc)
         try:
@@ -100,7 +91,7 @@ def _run_ffmpeg(cmd: list[str], output: Path, work_dir: Path, register: Callable
             err_text = stderr.decode("utf-8", "replace")
             base.logger.warning("ffmpeg failed (code=%s): %s", proc.returncode, err_text[-2000:])
             raise RuntimeError("Не удалось обработать медиа. Файл повреждён или формат не поддерживается.")
-    _validate_processed_media(output, audio_only)
+    _validate_processed_media(output, audio_only=output.suffix.lower() == ".mp3")
     return output
 
 
@@ -123,7 +114,7 @@ def process_media(
             "-af", _UNIQUE_AUDIO_FILTER,
             "-threads", "1", str(output),
         ]
-        return _run_ffmpeg(cmd, output, work_dir, register, audio_only=True)
+        return _run_ffmpeg(cmd, output, work_dir, register)
 
     logo = base._logo_path(watermark) if watermark.get("type") == "image" else None
     has_text = watermark.get("type") == "text" and bool(watermark.get("text"))
@@ -132,15 +123,9 @@ def process_media(
     if logo:
         cmd += ["-i", str(logo)]
     cmd += [
-        "-c:v", "libx264",
-        "-threads", "2",
-        "-c:a", "aac",
-        "-b:a", _AUDIO_BITRATE,
-        "-ar", "48000",
-        "-ac", "2",
-        "-movflags", "+faststart",
-        "-map_metadata", "-1",
-        "-metadata", "comment=media_hunter",
+        "-c:v", "libx264", "-threads", "2",
+        "-c:a", "aac", "-b:a", _AUDIO_BITRATE, "-ar", "48000", "-ac", "2",
+        "-movflags", "+faststart", "-map_metadata", "-1", "-metadata", "comment=media_hunter",
     ]
     cmd += ["-crf", "30", "-preset", "superfast"] if compress else ["-crf", "27", "-preset", "superfast"]
     base_vf = _unique_video_filters()
@@ -153,13 +138,7 @@ def process_media(
             f"[logo0][base]scale2ref=w=main_w*{pct:.4f}:h=main_h*{pct:.4f}:force_original_aspect_ratio=decrease[logo][base2];"
             f"[base2][logo]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
         )
-        cmd += [
-            "-filter_complex", fc,
-            "-map", "[v]",
-            "-map", "0:a?",
-            "-af", _UNIQUE_AUDIO_FILTER,
-            "-shortest",
-        ]
+        cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a?", "-af", _UNIQUE_AUDIO_FILTER, "-shortest"]
     else:
         vf_parts = [base_vf]
         if has_text:
@@ -184,7 +163,6 @@ def apply_watermark(
         return source
 
     profile = json.dumps(watermark, ensure_ascii=False, sort_keys=True, default=str)
-    import hashlib
     suffix = hashlib.sha1(profile.encode("utf-8")).hexdigest()[:12]
     output = work_dir / f"watermark_{suffix}.mp4"
     if output.exists():
@@ -197,17 +175,10 @@ def apply_watermark(
     if logo:
         cmd += ["-i", str(logo)]
     cmd += [
-        "-c:v", "libx264",
-        "-threads", "2",
-        "-c:a", "aac",
-        "-b:a", _AUDIO_BITRATE,
-        "-ar", "48000",
-        "-ac", "2",
-        "-movflags", "+faststart",
-        "-map_metadata", "-1",
-        "-metadata", "comment=media_hunter",
-        "-crf", "30" if compress else "27",
-        "-preset", "superfast",
+        "-c:v", "libx264", "-threads", "2",
+        "-c:a", "aac", "-b:a", _AUDIO_BITRATE, "-ar", "48000", "-ac", "2",
+        "-movflags", "+faststart", "-map_metadata", "-1", "-metadata", "comment=media_hunter",
+        "-crf", "30" if compress else "27", "-preset", "superfast",
     ]
     if logo:
         pct = max(5, min(int(watermark.get("logo_size", 20)), 80)) / 100.0
@@ -217,13 +188,7 @@ def apply_watermark(
             f"[logo0][0:v]scale2ref=w=main_w*{pct:.4f}:h=main_h*{pct:.4f}:force_original_aspect_ratio=decrease[logo][base];"
             f"[base][logo]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
         )
-        cmd += [
-            "-filter_complex", fc,
-            "-map", "[v]",
-            "-map", "0:a?",
-            "-af", _UNIQUE_AUDIO_FILTER,
-            "-shortest",
-        ]
+        cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a?", "-af", _UNIQUE_AUDIO_FILTER, "-shortest"]
     elif has_text:
         text_filter = base._build_text_filter(watermark, work_dir)
         if not text_filter:
@@ -233,4 +198,4 @@ def apply_watermark(
         return source
     cmd.append(str(output))
     base.logger.info("WATERMARK_VARIANT_CREATE work=%s file=%s", work_dir, output.name)
-    return _run_ffmpeg(cmd, output, work_dir, register, audio_only=False)
+    return _run_ffmpeg(cmd, output, work_dir, register)
