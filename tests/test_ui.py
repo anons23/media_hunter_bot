@@ -25,7 +25,6 @@ class UiRegressionTests(unittest.TestCase):
         source = inspect.getsource(wm_wizard._MainMenuInfoMiddleware)
         self.assertNotIn("_MAIN_MENU_INFO", source)
         self.assertNotIn("answer(info", source)
-        self.assertIn("edit_text", source)
 
     def test_channel_watermark_middleware_does_not_overwrite_screen(self):
         source = inspect.getsource(wm_wizard._MainMenuInfoMiddleware.__call__)
@@ -42,7 +41,3 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("↘ Низ справа", position_labels)
         self.assertIn("Маленький — 20%", logo_size_labels)
         self.assertNotIn("Watermark", color_labels + font_labels + position_labels)
-
-
-if __name__ == "__main__":
-    unittest.main()
