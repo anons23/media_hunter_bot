@@ -1,7 +1,9 @@
 import inspect
+import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from media_hunter_bot import processor
 from media_hunter_bot.unique_filter import unique_video_filters
@@ -16,6 +18,39 @@ class MediaUniquenessRegressionTests(unittest.TestCase):
         self.assertNotIn("unsharp=", expr)
         self.assertNotIn("noise=", expr)
 
+    def test_controlled_variation_stays_in_safe_ranges(self):
+        from media_hunter_bot import unique_filter
+
+        with patch.object(unique_filter.random, "uniform", side_effect=[0.991, -0.004, 1.029]):
+            expr = unique_video_filters()
+        self.assertIn("contrast=0.9910", expr)
+        self.assertIn("brightness=-0.0040", expr)
+        self.assertIn("saturation=1.0290", expr)
+        self.assertNotIn("noise=", expr)
+        self.assertNotIn("unsharp=", expr)
+
+    def test_controlled_variation_uses_declared_bounds(self):
+        from media_hunter_bot import unique_filter
+
+        values = iter([0.99, -0.005, 0.99])
+        with patch.object(unique_filter.random, "uniform", side_effect=lambda _low, _high: next(values)):
+            low = unique_video_filters()
+        values = iter([1.02, 0.008, 1.03])
+        with patch.object(unique_filter.random, "uniform", side_effect=lambda _low, _high: next(values)):
+            high = unique_video_filters()
+        for expr in (low, high):
+            self.assertRegex(expr, r"contrast=(0\.99|1\.02)\b")
+            self.assertRegex(expr, r"brightness=(-0\.0050|0\.0080)\b")
+            self.assertRegex(expr, r"saturation=(0\.99|1\.03)\b")
+
+    def test_variation_is_not_fixed_between_processing_passes(self):
+        from media_hunter_bot import unique_filter
+
+        with patch.object(unique_filter.random, "uniform", side_effect=[1.0, 0.0, 1.0, 1.01, 0.001, 1.02]):
+            first = unique_video_filters()
+            second = unique_video_filters()
+        self.assertNotEqual(first, second)
+
     def test_common_vertical_dimensions_stay_even(self):
         dimensions = ((720, 1280), (1080, 1920), (576, 1024), (1080, 1921), (721, 1281))
         for width, height in dimensions:
@@ -29,6 +64,42 @@ class MediaUniquenessRegressionTests(unittest.TestCase):
         source = inspect.getsource(optimized_processor.process_media)
         self.assertIn('"-threads", "2"', source)
         self.assertTrue('"-preset", "veryfast"' in source or '"-preset", "superfast"' in source)
+
+    def test_processed_media_validation_accepts_valid_video(self):
+        from media_hunter_bot.optimized_processor import _validate_processed_media
+
+        class Proc:
+            returncode = 0
+            stdout = '{"format":{"duration":"2.5"},"streams":[{"codec_type":"video","width":720,"height":1280}]}'
+            stderr = ""
+
+        with tempfile.TemporaryDirectory() as tmp, patch("media_hunter_bot.optimized_processor.subprocess.run", return_value=Proc()):
+            output = Path(tmp) / "output.mp4"
+            output.write_bytes(b"video")
+            _validate_processed_media(output, audio_only=False)
+
+    def test_processed_media_validation_rejects_empty_result(self):
+        from media_hunter_bot.optimized_processor import _validate_processed_media
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "output.mp4"
+            output.touch()
+            with self.assertRaisesRegex(RuntimeError, "не создан или пуст"):
+                _validate_processed_media(output, audio_only=False)
+
+    def test_processed_media_validation_rejects_missing_video_stream(self):
+        from media_hunter_bot.optimized_processor import _validate_processed_media
+
+        class Proc:
+            returncode = 0
+            stdout = '{"format":{"duration":"2.5"},"streams":[]}'
+            stderr = ""
+
+        with tempfile.TemporaryDirectory() as tmp, patch("media_hunter_bot.optimized_processor.subprocess.run", return_value=Proc()):
+            output = Path(tmp) / "output.mp4"
+            output.write_bytes(b"video")
+            with self.assertRaisesRegex(RuntimeError, "ожидаемый медиапоток"):
+                _validate_processed_media(output, audio_only=False)
 
     def test_cached_process_entry_accepts_legacy_positional_call(self):
         import media_hunter_bot
