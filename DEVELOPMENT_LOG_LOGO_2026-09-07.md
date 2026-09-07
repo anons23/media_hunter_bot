@@ -58,3 +58,15 @@ No changes were made here to uniqueness, queue priority, playlist fairness, tari
 
 ### Note
 Animated GIFs are intentionally accepted as GIF assets. The current processing pipeline already supports image watermark size/position/opacity through its FFmpeg watermark graph; a follow-up can add explicit infinite-loop normalization if a particular GIF's own loop metadata proves finite.
+
+## Diagnostic follow-up — logo FSM routing
+
+Production testing after the PNG/GIF rewrite still produced `Update ... is not handled` for photo, PNG, and GIF uploads while ordinary bot updates were handled normally. This points to a routing/FSM registration problem rather than Telegram delivery failure.
+
+### Diagnostic tracer
+- Added `media_hunter_bot/logo_debug.py`.
+- The tracer is registered from the same package bootstrap path used by production systemd startup.
+- It listens only while `LogoStates.upload` is active.
+- It logs the current FSM state and whether the incoming update contains photo, document, or animation data, plus safe file metadata (name/MIME only).
+- It raises `SkipHandler` so the real upload handler can continue; it does not consume or alter the upload.
+- The tracer is intentionally diagnostic-only and does not change uniqueness, queueing, tariffs, watermark rendering, or autopost logic.
