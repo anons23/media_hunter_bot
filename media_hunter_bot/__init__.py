@@ -117,6 +117,12 @@ def _patched_register_wm_wizard(router, menu_fn):
     except Exception:
         # Keep startup resilient; the primary logo handlers remain available.
         pass
+    try:
+        from .logo_debug import patch_router as _patch_logo_debug
+        _patch_logo_debug(router)
+    except Exception:
+        # Diagnostics must never prevent normal bot startup.
+        pass
     return result
 
 
