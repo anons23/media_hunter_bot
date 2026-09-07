@@ -2,7 +2,7 @@
 
 ## Gallery logo upload follow-up
 
-Production smoke testing after the uniqueness update showed that video processing and autopost/cache were working, but a Telegram gallery photo sent while the logo wizard was waiting for an upload still appeared as `Update ... is not handled`.
+Production smoke testing after the uniqueness update showed that a Telegram gallery photo sent while the logo wizard was waiting for an upload still appeared as `Update ... is not handled`.
 
 ### Fix
 - Added `media_hunter_bot/logo_photo_fallback.py` as an FSM-safe last-resort gallery-photo handler.
@@ -48,17 +48,6 @@ After successful upload the user receives one dedicated settings screen with:
 
 Settings are stored in the existing watermark structure for either the user or selected channel.
 
-### Diagnostics
-
-The wizard now emits explicit `LOGO_RECEIVE`, `LOGO_VALIDATED`, `LOGO_SETTINGS`, `LOGO_UPLOAD_FAILED`, and `LOGO_SAVED` log records so a future Telegram routing problem can be diagnosed from the service journal instead of relying only on `Update ... is not handled`.
-
-## Scope protection
-
-No changes were made here to uniqueness, queue priority, playlist fairness, tariff limits, upload limits, autopost, or ordinary video processing.
-
-### Note
-Animated GIFs are intentionally accepted as GIF assets. The current processing pipeline already supports image watermark size/position/opacity through its FFmpeg watermark graph; a follow-up can add explicit infinite-loop normalization if a particular GIF's own loop metadata proves finite.
-
 ## Diagnostic follow-up — logo FSM routing
 
 Production testing after the PNG/GIF rewrite still produced `Update ... is not handled` for photo, PNG, and GIF uploads while ordinary bot updates were handled normally. This points to a routing/FSM registration problem rather than Telegram delivery failure.
@@ -69,4 +58,19 @@ Production testing after the PNG/GIF rewrite still produced `Update ... is not h
 - It listens only while `LogoStates.upload` is active.
 - It logs the current FSM state and whether the incoming update contains photo, document, or animation data, plus safe file metadata (name/MIME only).
 - It raises `SkipHandler` so the real upload handler can continue; it does not consume or alter the upload.
-- The tracer is intentionally diagnostic-only and does not change uniqueness, queueing, tariffs, watermark rendering, or autopost logic.
+- The tracer is intentionally diagnostic-only.
+
+## Diagnostic follow-up — media state trace
+
+The production journal continued to show `Update ... is not handled` for logo media, while no `LOGO_DEBUG` line appeared. To distinguish an inactive FSM state from a router/filter-order problem, a second non-consuming tracer was added.
+
+### Diagnostic tracer
+- Added `media_hunter_bot/logo_state_trace.py`.
+- It listens for photo/document/animation messages and checks the actual FSM state at dispatch time.
+- It emits `LOGO_STATE_TRACE` only when the state is exactly `LogoStates.upload`.
+- It raises `SkipHandler`, so it cannot consume ordinary media or change the normal upload path.
+- Registered from `media_hunter_bot/__init__.py`, the same bootstrap used by the systemd entrypoint.
+- No uniqueness, queue, tariff, watermark-rendering, or autopost logic was changed.
+
+### Next production diagnostic
+After CI passes, deploy this diagnostic commit, open Watermark → Logo, and send one photo. The journal result will tell us whether `LogoStates.upload` is active at the moment Telegram delivers the media.
