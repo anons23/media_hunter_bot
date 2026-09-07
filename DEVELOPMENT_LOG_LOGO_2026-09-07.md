@@ -24,3 +24,37 @@ After CI passes, deploy the branch to VPS and smoke-test:
 1. Watermark → Logo → send a normal gallery photo.
 2. Confirm the bot responds with logo settings and the log contains `LOGO_PHOTO_FALLBACK uid=...` instead of `Update ... is not handled`.
 3. Save the logo and process a video to confirm the watermark is rendered.
+
+## Logo wizard rewrite — PNG + GIF
+
+The logo upload/settings flow was rewritten without changing the media queue, uniqueness rules, tariff limits, or autopost behavior.
+
+### Upload formats
+
+- Telegram gallery photos are accepted and normalized to PNG.
+- PNG files are accepted directly.
+- GIF files are accepted as documents and kept as GIF assets so the processing pipeline can use their animation.
+- Telegram animation messages are accepted only when their file name is `.gif`; non-GIF animations are rejected with a clear instruction to send the GIF as a file.
+- File size is checked both against Telegram metadata when available and again after download.
+- Existing `validate_logo()` remains the final media/dimension validation gate.
+
+### Settings
+
+After successful upload the user receives one dedicated settings screen with:
+- logo size: 10%, 20%, 30%, 40%, 50%;
+- position: top-left, top-right, center, bottom-left, bottom-right;
+- opacity: 40%, 60%, 80%, 100%;
+- save/cancel actions.
+
+Settings are stored in the existing watermark structure for either the user or selected channel.
+
+### Diagnostics
+
+The wizard now emits explicit `LOGO_RECEIVE`, `LOGO_VALIDATED`, `LOGO_SETTINGS`, `LOGO_UPLOAD_FAILED`, and `LOGO_SAVED` log records so a future Telegram routing problem can be diagnosed from the service journal instead of relying only on `Update ... is not handled`.
+
+## Scope protection
+
+No changes were made here to uniqueness, queue priority, playlist fairness, tariff limits, upload limits, autopost, or ordinary video processing.
+
+### Note
+Animated GIFs are intentionally accepted as GIF assets. The current processing pipeline already supports image watermark size/position/opacity through its FFmpeg watermark graph; a follow-up can add explicit infinite-loop normalization if a particular GIF's own loop metadata proves finite.
