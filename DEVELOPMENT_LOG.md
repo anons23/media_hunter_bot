@@ -44,6 +44,19 @@
 - ✅ `optimized_processor.py`: лёгкий `eq`, без `unsharp`/`noise`, `-threads 2`, preset `superfast`, CRF 27 для обычной uniqueness, CRF 30 для compression.
 - ✅ `process_media()` создаёт `work_dir` до FFmpeg.
 
+## Audio uniqueization quality — 2026-09-07
+- **Проблема:** после уникализации звук YouTube-клипов был заметно хуже оригинала.
+- **Причина:** в `optimized_processor` (боевой path через `__init__.py` patch) стоял фиксированный **AAC 128k** + почти бесполезный `volume=1.01`; ветка с logo вообще без `-af`.
+- **Исправление (код):** commit `e40c91e5eb11a8cecdfb013910327f2be34061d3`.
+  - AAC **192k**, `-ar 48000`, stereo.
+  - Единый soft `-af`: `volume=1.02,highpass=f=40,lowpass=f=16000` на **всех** ветках unique/watermark (включая logo).
+  - MP3 path: `libmp3lame -b:a 192k` + тот же soft af.
+- **Ожидание:** качество ближе к типичному соцсетевому источнику; битстрим всё равно новый (не байт-копия).
+- **Ограничение:** это **не** гарантия обхода Content ID / аудиофингерпринта YouTube/TikTok. Сильный fingerprint match чужого контента лёгкими фильтрами не снимается; агрессивный pitch/tempo портит качество и sync — намеренно не используется.
+- `oversize_processor` (>100 MB) по-прежнему режет audio budget (24–64k) ради лимита Telegram — это отдельный compression path, не unique quality path.
+- ⬜ VPS deploy + smoke: сравнить на слух YouTube-клип до/после unique ≤100 MB.
+- ⬜ CI после audio commit.
+
 ## Local Bot API / logo
 - ✅ `TelegramAPIServer.from_base()` patched in `media_hunter_bot/__init__.py` to default `is_local=True`.
 - Причина: Local Bot API отдаёт абсолютный filesystem path; без local mode aiogram строил HTTP `/file/.../<absolute path>`.
@@ -154,14 +167,15 @@
 1. Branch: `Media_hanter-v3-security`.
 2. **CI verification: ✅ green run `33895607263` (#268)** для предыдущего oversize test fix.
 3. `<=100 MB`: mandatory uniqueness preserved.
-4. `>100 MB`: compression-only path, latest convergence fix `ec22e099...` ожидает CI.
-5. Logo upload: **❌ production unresolved**; state-wide handler fix did not change observed behavior after clean restart.
-6. Legacy `Мой канал`: one-shot cleanup guard; ⬜ production verification.
-7. 1-channel autopost: exact-copy/no second FFmpeg; ⬜ production verification.
-8. Multi-channel autopost: frozen unique base + watermark variants; ⬜ production verification.
-9. Playlist: fairness/80 MB/quota logic implemented; ⬜ production smoke.
-10. Free/Premium channel limits implemented; ⬜ production smoke.
-11. VPS service: **✅ healthy after clean stop/start; production logo smoke remains ❌.**
+4. **Audio quality unique path:** AAC **192k** + soft af — commit `e40c91e5...`; ⬜ VPS smoke на слух.
+5. `>100 MB`: compression-only path, latest convergence fix `ec22e099...` ожидает CI.
+6. Logo upload: **❌ production unresolved**; state-wide handler fix did not change observed behavior after clean restart.
+7. Legacy `Мой канал`: one-shot cleanup guard; ⬜ production verification.
+8. 1-channel autopost: exact-copy/no second FFmpeg; ⬜ production verification.
+9. Multi-channel autopost: frozen unique base + watermark variants; ⬜ production verification.
+10. Playlist: fairness/80 MB/quota logic implemented; ⬜ production smoke.
+11. Free/Premium channel limits implemented; ⬜ production smoke.
+12. VPS service: **✅ healthy after clean stop/start; production logo smoke remains ❌.**
 
 ## VPS deployment commands
 ```bash
@@ -177,6 +191,7 @@ journalctl -u media-hunter.service --since "2 minutes ago" --no-pager | grep -E 
 After deployment smoke-test:
 - Logo: send normal gallery photo in logo flow → settings → save → verify persisted PNG → short video watermark.
 - >100 MB: must not report uniqueness failure; must compress/send successfully below 100 MB.
+- Audio ≤100 MB: compare YouTube source vs bot output on headphones (expect closer to original than old 128k).
 - Verify old `Мой канал` is absent.
 - Verify 1-channel autopost reuses same processed file/no second FFmpeg.
 - Verify multi-channel creates `UNIQUE_BASE_CREATE` once and variants without repeated uniqueness.
