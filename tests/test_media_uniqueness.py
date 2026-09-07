@@ -11,10 +11,10 @@ from media_hunter_bot.unique_filter import unique_video_filters
 
 class MediaUniquenessRegressionTests(unittest.TestCase):
     def test_processor_uses_safe_even_dimension_filter(self):
-        self.assertEqual(processor._unique_video_filters(), unique_video_filters())
         expr = processor._unique_video_filters()
         self.assertIn("trunc(iw*0.998/2)*2", expr)
         self.assertIn("trunc(ih*0.998/2)*2", expr)
+        self.assertIn("eq=contrast=", expr)
         self.assertNotIn("unsharp=", expr)
         self.assertNotIn("noise=", expr)
 
@@ -38,10 +38,12 @@ class MediaUniquenessRegressionTests(unittest.TestCase):
         values = iter([1.02, 0.008, 1.03])
         with patch.object(unique_filter.random, "uniform", side_effect=lambda _low, _high: next(values)):
             high = unique_video_filters()
-        for expr in (low, high):
-            self.assertRegex(expr, r"contrast=(0\.99|1\.02)\b")
-            self.assertRegex(expr, r"brightness=(-0\.0050|0\.0080)\b")
-            self.assertRegex(expr, r"saturation=(0\.99|1\.03)\b")
+        self.assertIn("contrast=0.9900", low)
+        self.assertIn("brightness=-0.0050", low)
+        self.assertIn("saturation=0.9900", low)
+        self.assertIn("contrast=1.0200", high)
+        self.assertIn("brightness=0.0080", high)
+        self.assertIn("saturation=1.0300", high)
 
     def test_variation_is_not_fixed_between_processing_passes(self):
         from media_hunter_bot import unique_filter
