@@ -16,7 +16,7 @@ def _sparse(path: Path, size: int) -> Path:
 
 
 def _fake_run_factory(out_size: int, calls: list):
-    def fake_run(cmd, output, register, timeout):
+    def fake_run(cmd, output, register, timeout, duration=0.0):
         calls.append(cmd)
         _sparse(Path(output), out_size)
         return Path(output)
@@ -90,7 +90,7 @@ class TestOversizePolicy(unittest.TestCase):
 
     def test_timeout_scales_with_duration(self):
         self.assertEqual(op._timeout_for(10), op._MIN_TIMEOUT)
-        self.assertEqual(op._timeout_for(3600), 3 * 3600)
+        self.assertEqual(op._timeout_for(1800), 3 * 1800)
         self.assertEqual(op._timeout_for(10 ** 6), op._MAX_TIMEOUT)
 
 

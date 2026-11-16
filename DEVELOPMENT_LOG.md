@@ -239,3 +239,11 @@ Never record bot tokens or `.env` contents here.
 - > 100 MB videos: nothing is overlaid; user notice.
 - Watermark slot is still one per scope: text OR plate (editor warns before replacing).
 - ⬜ VPS: domain + nginx + certbot, `WEBAPP_URL`, smoke both editors on iOS/Android.
+
+## Weak-server hardening + UX — 2026-11-16
+- Disk guard (MIN_FREE_DISK_MB) on enqueue and after download; 700 MB source cap; 30-min video cap (yt-dlp match-filter before download).
+- Cleaner every 15 min, aggressive when disk is low; local Bot API dir cleanup + immediate removal of the server's copy of user uploads.
+- ffmpeg/yt-dlp under nice/ionice; oversize timeout cap 2 h.
+- Queue position + wait estimate; "Обработка 47%" progress bar (ffmpeg -progress, throttled edits); buttons under results; new welcome; clear yt-dlp error messages.
+- deploy/server_setup.sh: 1 GB swap, journald 200 MB, Restart=always.
+- ⬜ VPS: run server_setup.sh, set LOCAL_BOT_API_DIR, check .env limits (old .env may still say 1536 MB).

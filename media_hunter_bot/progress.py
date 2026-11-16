@@ -23,6 +23,8 @@ class ProgressTracker:
         self.stages = list(self.STAGES_URL if has_url else self.STAGES_UPLOAD)
         self.current = -1
         self.message_id: int | None = None
+        self.percent: int | None = None
+        self._last_percent_edit = 0.0
 
     def _render(self, failed: bool = False, cancelled: bool = False) -> str:
         lines = ["⏳ <b>Обработка видео</b>", ""]
@@ -38,6 +40,9 @@ class ProgressTracker:
                 icon = "🔄"
             else:
                 icon = "⬜"
+            if i == self.current and key == "process" and self.percent is not None and not (failed or cancelled):
+                filled = self.percent // 10
+                label = f"{label} {self.percent}%\n      {'▓' * filled}{'░' * (10 - filled)}"
             lines.append(f"{icon} {label}")
         if failed:
             lines.extend(["", "Обработка прервана."])
@@ -62,6 +67,20 @@ class ProgressTracker:
         if idx < self.current:
             return
         self.current = idx
+        self.percent = None
+        await self._edit()
+
+    async def set_percent(self, fraction: float) -> None:
+        """Show "Обработка 47%" (throttled to respect Telegram edit limits)."""
+        import time
+        pct = max(0, min(99, int(fraction * 100)))
+        now = time.monotonic()
+        if self.percent is not None and (pct - self.percent < 3 or now - self._last_percent_edit < 6):
+            return
+        if self.percent is None and now - self._last_percent_edit < 6 and pct < 3:
+            return
+        self.percent = pct
+        self._last_percent_edit = now
         await self._edit()
 
     async def complete(self) -> None:

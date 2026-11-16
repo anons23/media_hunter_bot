@@ -66,6 +66,11 @@ from .config import (
     TELEGRAM_MAX_UPLOAD_MB,
     FREE_MAX_CHANNELS,
     PREMIUM_MAX_CHANNELS,
+    MIN_FREE_DISK_MB,
+    MAX_VIDEO_MINUTES,
+    CLEANER_INTERVAL_MIN,
+    LOCAL_BOT_API_DIR,
+    LOCAL_BOT_API_FILE_TTL_MIN,
 )
 from . import db
 from .processor import (
@@ -82,6 +87,39 @@ from .processor import (
     validate_source_url,
 )
 from .oversize_processor import compress_for_send
+
+
+WELCOME_TEXT = (
+    "👋 <b>Media Hunter</b> — скачивает и уникализирует видео.\n\n"
+    "📥 Пришлите ссылку на YouTube, TikTok или Instagram — или своё видео.\n"
+    "💧 Добавьте свой логотип-плашку или надпись — они лягут на каждое видео.\n"
+    "🔄 Подключите канал — готовые видео будут публиковаться сами.\n\n"
+    "Просто отправьте ссылку прямо сюда 👇"
+)
+
+BUSY_DISK_TEXT = "Сервер сейчас загружен (мало свободного места). Попробуйте через 10–15 минут."
+
+
+def ensure_disk_space(need_mb: int = 0) -> None:
+    """Refuse new work before the small VPS disk fills up."""
+    if mediarun.free_disk_mb(MEDIA_DIR) < MIN_FREE_DISK_MB + max(0, need_mb):
+        raise RuntimeError(BUSY_DISK_TEXT)
+
+
+def format_wait(seconds: float) -> str:
+    minutes = max(1, round(seconds / 60))
+    return f"~{minutes} мин" if minutes < 60 else f"~{minutes // 60} ч {minutes % 60} мин"
+
+
+def result_keyboard() -> InlineKeyboardMarkup:
+    return kb([[B("📥 Ещё видео", "download"), B("🏠 Меню", "back")]])
+
+
+def queued_text(engine, uid: int, what: str) -> str:
+    ahead, wait = engine.queue_eta(uid)
+    if ahead <= 0:
+        return f"⏳ {what}, начинаю обработку…"
+    return f"⏳ {what}. Перед вами в очереди: {ahead}, ожидание {format_wait(wait)}."
 
 
 def plate_user_note(watermark, source_info, size: int, audio_only: bool) -> str | None:
@@ -114,6 +152,7 @@ def upload_timeout(path: Path) -> int:
 from .progress import ProgressTracker
 from . import plate as plate_mod
 from . import webapp
+from . import mediarun
 from .opp_logic import opp_check
 from .opp_admin import register_opp_admin
 from .admin_premium import register_admin_premium
@@ -248,18 +287,31 @@ class Engine:
         self._lock = asyncio.Lock()
         self._proc_lock = threading.Lock()
         self._restarting: set[int] = set()
+        self._avg_job_s = 90.0
 
     async def start(self):
         for _ in range(MAX_CONCURRENT):
             self.workers.append(asyncio.create_task(self._worker()))
         self.cleaner_task = asyncio.create_task(self._cleaner())
 
-    async def ensure_can_enqueue(self, uid: int) -> None:
+    def queue_eta(self, uid: int) -> tuple[int, float]:
+        """(jobs ahead of the user's newest job, rough wait in seconds)."""
+        queued = list(getattr(self.q, "_queue", []))
+        mine = [j for j in queued if j.uid == uid]
+        running = sum(len(t) for t in self.tasks.values())
+        if not mine:
+            return running, running * self._avg_job_s
+        last = max(mine, key=lambda j: (j.priority, j.seq))
+        ahead = sum(1 for j in queued if (j.priority, j.seq) < (last.priority, last.seq)) + running
+        return ahead, (ahead + 1) * self._avg_job_s / max(1, MAX_CONCURRENT)
+
+    async def ensure_can_enqueue(self, uid: int, need_mb: int = 0) -> None:
         """Raise if a new job cannot be accepted right now (no side effects).
 
         Used by the upload path to reject early before downloading a large
         Telegram file. add() still re-checks under the same lock at enqueue.
         """
+        ensure_disk_space(need_mb)
         async with self._lock:
             if uid in self._restarting:
                 raise RuntimeError("Ваши задачи сейчас перезапускаются. Попробуйте снова через несколько секунд.")
@@ -389,8 +441,12 @@ class Engine:
                     continue
                 t = asyncio.create_task(self._run_job(j))
                 self.tasks.setdefault(j.uid, set()).add(t)
+                started = asyncio.get_running_loop().time()
                 try:
                     await t
+                    took = asyncio.get_running_loop().time() - started
+                    if 5 < took < 4 * 3600:
+                        self._avg_job_s = 0.7 * self._avg_job_s + 0.3 * took
                 except asyncio.CancelledError:
                     pass
                 finally:
@@ -475,6 +531,14 @@ class Engine:
                 return
             await progress.advance("analyze")
             source_info, size = await asyncio.to_thread(ffprobe, source)
+            try:
+                src_duration = float(((source_info or {}).get("format") or {}).get("duration") or 0) if isinstance(source_info, dict) else 0.0
+            except (TypeError, ValueError):
+                src_duration = 0.0
+            if MAX_VIDEO_MINUTES > 0 and src_duration > MAX_VIDEO_MINUTES * 60:
+                raise RuntimeError(f"Видео длиннее {MAX_VIDEO_MINUTES:g} минут — такие бот не обрабатывает. Пришлите ролик короче.")
+            # Output needs roughly the source size again; keep the reserve.
+            ensure_disk_space(int(size / (1024 * 1024)))
             hard_limit = MAX_SOURCE_DOWNLOAD_MB * 1024 * 1024
             if size > hard_limit:
                 raise RuntimeError(f"Исходный файл превышает абсолютный лимит {MAX_SOURCE_DOWNLOAD_MB} МБ")
@@ -488,6 +552,12 @@ class Engine:
                 await progress.cancel()
                 return
             await progress.advance("process")
+            loop = asyncio.get_running_loop()
+
+            def _sink(fraction: float, _p=progress, _loop=loop) -> None:
+                _loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_p.set_percent(fraction)))
+
+            mediarun.progress_sink.set(_sink)
             if audio_only:
                 result = await asyncio.to_thread(
                     process_media,
@@ -537,6 +607,7 @@ class Engine:
                     register=register,
                 )
 
+            mediarun.progress_sink.set(None)
             meta = await asyncio.to_thread(metadata, source)
             caption = str(meta.get("description") or media_title or meta.get("title") or "")[:900]
             result_size = (await asyncio.to_thread(result.stat)).st_size
@@ -636,9 +707,9 @@ class Engine:
     async def _send_private(self, uid: int, path: Path, caption: str, filename: str | None = None):
         name = filename or safe_media_filename(path.stem, path.suffix or ".mp4")
         if path.suffix.lower() == ".mp3":
-            await self.bot.send_audio(uid, FSInputFile(path, filename=name), caption=caption or None, request_timeout=upload_timeout(path))
+            await self.bot.send_audio(uid, FSInputFile(path, filename=name), caption=caption or None, reply_markup=result_keyboard(), request_timeout=upload_timeout(path))
         else:
-            await self.bot.send_video(uid, FSInputFile(path, filename=name), caption=caption or None, supports_streaming=True, request_timeout=upload_timeout(path))
+            await self.bot.send_video(uid, FSInputFile(path, filename=name), caption=caption or None, supports_streaming=True, reply_markup=result_keyboard(), request_timeout=upload_timeout(path))
         ad = await db.aget_setting("ad_text", "")
         button = await db.aget_setting("ad_button", "")
         url = await db.aget_setting("ad_url", "")
@@ -648,8 +719,14 @@ class Engine:
     async def _cleaner(self):
         while True:
             try:
-                await asyncio.sleep(3600)
-                await asyncio.to_thread(cleanup_media, CLEANER_AGE_HOURS, self.active_paths())
+                await asyncio.sleep(CLEANER_INTERVAL_MIN * 60)
+                # Low disk: also drop leftovers older than 1 h, not only 12 h.
+                low = mediarun.free_disk_mb(MEDIA_DIR) < MIN_FREE_DISK_MB * 2
+                await asyncio.to_thread(cleanup_media, 1 if low else CLEANER_AGE_HOURS, self.active_paths())
+                if LOCAL_BOT_API_DIR:
+                    removed = await asyncio.to_thread(mediarun.cleanup_bot_api_dir, LOCAL_BOT_API_DIR, LOCAL_BOT_API_FILE_TTL_MIN)
+                    if removed:
+                        logger.info("BOT_API_CLEANUP removed=%s", removed)
                 active_logos = await db.aactive_logo_paths()
                 await asyncio.to_thread(cleanup_logos, CLEANER_AGE_HOURS * 7, active_logos)
                 try:
@@ -711,7 +788,7 @@ async def start(m: Message, bot: Bot, state: FSMContext):
     if missing:
         await m.answer("🔐 Для использования бота выполните обязательные подписки:", reply_markup=kb(rows + [[B("◀️ Назад", "back")]]))
         return
-    await m.answer("👋 Media Hunter готов.", reply_markup=menu(m.from_user.id))
+    await m.answer(WELCOME_TEXT, reply_markup=menu(m.from_user.id), parse_mode="HTML")
 
 
 @router.callback_query(F.data == "menu_ref")
@@ -858,8 +935,9 @@ async def url_message(m: Message, bot: Bot, engine: Engine):
         await m.answer("🔐 Сначала выполните обязательные подписки.", reply_markup=kb(rows))
         return
     try:
+        ensure_disk_space()
         await engine.add(m.from_user.id, url=m.text.strip())
-        await m.answer("⏳ Ссылка добавлена в очередь.")
+        await m.answer(queued_text(engine, m.from_user.id, "Ссылка принята"))
     except (RuntimeError, ValueError) as e:
         await m.answer(f"❌ {user_facing_error(e)}")
 
@@ -906,7 +984,7 @@ async def upload(m: Message, bot: Bot, engine: Engine):
         return
     # Reject before downloading a potentially large Telegram file.
     try:
-        await engine.ensure_can_enqueue(m.from_user.id)
+        await engine.ensure_can_enqueue(m.from_user.id, need_mb=int((file_size or 0) * 2 / (1024 * 1024)))
     except RuntimeError as e:
         await m.answer(f"❌ {user_facing_error(e)}")
         return
@@ -917,12 +995,14 @@ async def upload(m: Message, bot: Bot, engine: Engine):
     try:
         f = await asyncio.wait_for(bot.get_file(file_id), timeout=60)
         await asyncio.wait_for(bot.download_file(f.file_path, destination=dst, timeout=900), timeout=900)
+        # The local Bot API server keeps its own copy forever; drop it now.
+        mediarun.remove_bot_api_file(LOCAL_BOT_API_DIR, f.file_path)
         actual_size = dst.stat().st_size
         if actual_size > MAX_USER_UPLOAD_MB * 1024 * 1024:
             raise RuntimeError(f"Файл превышает абсолютный лимит {MAX_USER_UPLOAD_MB} МБ")
         await engine.add(m.from_user.id, source=dst)
         handed = True
-        await m.answer("⏳ Видео принято в очередь.")
+        await m.answer(queued_text(engine, m.from_user.id, "Видео принято"))
     except (RuntimeError, ValueError) as e:
         await m.answer(f"❌ {user_facing_error(e)}")
     except Exception as e:

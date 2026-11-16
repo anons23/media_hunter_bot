@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import COOKIES_PATH, LOGO_DIR, MAX_WATERMARK_MB, MAX_WATERMARK_PX, MEDIA_DIR, MAX_SOURCE_DOWNLOAD_MB
+from .config import COOKIES_PATH, LOGO_DIR, MAX_WATERMARK_MB, MAX_WATERMARK_PX, MEDIA_DIR, MAX_SOURCE_DOWNLOAD_MB, MAX_VIDEO_MINUTES
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +254,28 @@ def _title_from_info_json(work_dir: Path) -> str:
     return ""
 
 
+_DOWNLOAD_ERRORS = (
+    (("private video", "this video is private", "is private"), "Видео закрыто (приватное). Бот может скачать только открытые видео."),
+    (("sign in to confirm your age", "age-restricted", "age restricted"), "Видео с возрастным ограничением — без входа в аккаунт его не скачать."),
+    (("sign in to confirm you", "login required", "log in", "cookies"), "Сайт требует вход в аккаунт. Попробуйте другую ссылку или позже."),
+    (("not available in your country", "geo restrict", "geo-restrict"), "Видео недоступно в регионе сервера."),
+    (("video unavailable", "this video is unavailable", "has been removed", "http error 404", "not found", "does not exist"), "Видео удалено или недоступно. Проверьте ссылку."),
+    (("unsupported url",), "Этот сайт или тип ссылки не поддерживается. Пришлите ссылку на YouTube, TikTok или Instagram."),
+    (("is live", "live event", "premieres in"), "Это прямой эфир или премьера — скачать можно после окончания."),
+    (("larger than max-filesize", "file is larger than"), "Видео слишком большое для бота."),
+    (("http error 429", "too many requests", "rate-limit", "rate limit"), "Сайт временно ограничил скачивание. Попробуйте через 10–15 минут."),
+)
+
+
+def explain_download_error(err_text: str) -> str:
+    """Turn yt-dlp stderr into a clear message for the user."""
+    low = (err_text or "").lower()
+    for needles, message in _DOWNLOAD_ERRORS:
+        if any(n in low for n in needles):
+            return message
+    return "Не удалось скачать медиа. Проверьте ссылку или попробуйте позже."
+
+
 def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> tuple[Path, str]:
     """Download media and return (file_path, title).
 
@@ -276,13 +298,17 @@ def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> tuple
         "--write-info-json",
         "--no-progress",
     ]
+    if MAX_VIDEO_MINUTES > 0:
+        # Skip over-long videos before downloading them (saves disk and CPU).
+        cmd.extend(["--match-filter", f"!duration | duration <= {int(MAX_VIDEO_MINUTES * 60)}"])
     if COOKIES_PATH.exists():
         cmd.extend(["--cookies", str(COOKIES_PATH)])
     cmd.append(url)
-    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+    from .mediarun import low_priority
+    with subprocess.Popen(low_priority(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
         register(proc)
         try:
-            _, stderr = proc.communicate(timeout=600)
+            stdout, stderr = proc.communicate(timeout=600)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
@@ -293,7 +319,9 @@ def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> tuple
         if proc.returncode != 0:
             err_text = stderr.decode("utf-8", "replace")[:2000]
             logger.warning("yt-dlp failed (code=%s): %s", proc.returncode, err_text)
-            raise RuntimeError("Не удалось скачать медиа. Проверьте ссылку или попробуйте позже.")
+            raise RuntimeError(explain_download_error(err_text))
+        if b"does not pass filter" in stdout or b"does not pass filter" in stderr:
+            raise RuntimeError(f"Видео длиннее {MAX_VIDEO_MINUTES:g} минут — такие бот не обрабатывает. Пришлите ролик короче.")
     candidates = [c for c in work_dir.glob("source.*") if c.suffix.lower() != ".json" and not c.name.endswith(".info.json")]
     candidates = [c for c in candidates if c.is_file() and c.suffix.lower() in {".mp4", ".webm", ".mkv", ".m4a", ".mp3", ".mov"}]
     if not candidates:

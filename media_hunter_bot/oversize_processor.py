@@ -21,6 +21,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
+from . import mediarun
 from . import processor as base
 from .config import (
     OVERSIZE_AUDIO_BITRATE,
@@ -36,7 +37,7 @@ from .optimized_processor import _validate_processed_media
 _MB = 1024 * 1024
 _COPY_AUDIO_CODECS = frozenset({"aac", "mp3"})
 _MIN_TIMEOUT = 30 * 60
-_MAX_TIMEOUT = 6 * 60 * 60
+_MAX_TIMEOUT = 2 * 60 * 60
 
 
 class _EncodeFailed(RuntimeError):
@@ -64,26 +65,14 @@ def _timeout_for(duration: float) -> int:
     return int(min(_MAX_TIMEOUT, max(_MIN_TIMEOUT, duration * 3)))
 
 
-def _run(cmd: list[str], output: Path, register: Callable[[Any], None], timeout: int) -> Path:
-    with subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as proc:
-        register(proc)
-        try:
-            _, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            base.logger.warning("OVERSIZE_TIMEOUT output=%s timeout=%ss", output.name, timeout)
-            raise _EncodeTimeout("Превышено время ожидания при сжатии видео.")
-        finally:
-            register(None)
-        if proc.returncode != 0:
-            base.logger.warning(
-                "OVERSIZE_FFMPEG_FAIL output=%s code=%s: %s",
-                output.name,
-                proc.returncode,
-                stderr.decode("utf-8", "replace")[-2000:],
-            )
-            raise _EncodeFailed("Не удалось обработать видео при сжатии.")
+def _run(cmd: list[str], output: Path, register: Callable[[Any], None], timeout: int, duration: float = 0.0) -> Path:
+    code, err, timed_out = mediarun.run_ffmpeg(cmd, register, timeout, duration)
+    if timed_out:
+        base.logger.warning("OVERSIZE_TIMEOUT output=%s timeout=%ss", output.name, timeout)
+        raise _EncodeTimeout("Превышено время ожидания при сжатии видео.")
+    if code != 0:
+        base.logger.warning("OVERSIZE_FFMPEG_FAIL output=%s code=%s: %s", output.name, code, err)
+        raise _EncodeFailed("Не удалось обработать видео при сжатии.")
     if not output.exists() or output.stat().st_size <= 0:
         raise _EncodeFailed("Не удалось получить сжатое видео.")
     return output
@@ -185,7 +174,7 @@ def compress_for_send(
     )
     result: Path | None = None
     try:
-        _run(cmd, output, register, timeout)
+        _run(cmd, output, register, timeout, _duration_seconds(info))
         _validate_processed_media(output, audio_only=False)
         result = output
     except _EncodeTimeout:

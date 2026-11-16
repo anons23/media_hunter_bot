@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
+from . import mediarun
 from . import plate as plate_mod
 from . import processor as base
 from .config import SOFT_UNIQUE_SIZE_MB
@@ -136,23 +137,16 @@ def _run_ffmpeg(
     register: Callable[[Any], None],
     timeout: int | None = None,
 ) -> Path:
+    duration = _input_duration(cmd)
     if timeout is None:
-        timeout = _timeout_for(_input_duration(cmd))
-    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
-        register(proc)
-        try:
-            _, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            base.logger.warning("ffmpeg timed out (%ss) for work_dir=%s", timeout, work_dir)
-            raise RuntimeError("Превышено время ожидания при обработке видео. Попробуйте позже или пришлите видео короче.")
-        finally:
-            register(None)
-        if proc.returncode != 0:
-            err_text = stderr.decode("utf-8", "replace")
-            base.logger.warning("ffmpeg failed (code=%s): %s", proc.returncode, err_text[-2000:])
-            raise RuntimeError("Не удалось обработать медиа. Файл повреждён или формат не поддерживается.")
+        timeout = _timeout_for(duration)
+    code, err_text, timed_out = mediarun.run_ffmpeg(cmd, register, timeout, duration)
+    if timed_out:
+        base.logger.warning("ffmpeg timed out (%ss) for work_dir=%s", timeout, work_dir)
+        raise RuntimeError("Превышено время ожидания при обработке видео. Попробуйте позже или пришлите видео короче.")
+    if code != 0:
+        base.logger.warning("ffmpeg failed (code=%s): %s", code, err_text)
+        raise RuntimeError("Не удалось обработать медиа. Файл повреждён или формат не поддерживается.")
     _validate_processed_media(output, audio_only=output.suffix.lower() == ".mp3")
     return output
 

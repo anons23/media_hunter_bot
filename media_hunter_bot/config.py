@@ -34,6 +34,20 @@ WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8090"))
 MAX_LOGO_GIF_MB = int(os.getenv("MAX_LOGO_GIF_MB", "10"))
 MAX_LOGO_GIF_SECONDS = float(os.getenv("MAX_LOGO_GIF_SECONDS", "15"))
 
+# Weak-server protection (1 CPU / small disk).
+# Free disk space that must remain after a job; new jobs are refused below it.
+MIN_FREE_DISK_MB = int(os.getenv("MIN_FREE_DISK_MB", "1500"))
+# Longest video the bot processes (0 = no limit).
+MAX_VIDEO_MINUTES = float(os.getenv("MAX_VIDEO_MINUTES", "30"))
+# How often temporary files are cleaned, minutes.
+CLEANER_INTERVAL_MIN = max(5, int(os.getenv("CLEANER_INTERVAL_MIN", "15")))
+# Working dir of the local telegram-bot-api server (its --dir). When set, the
+# bot deletes files it no longer needs there (the server never does).
+LOCAL_BOT_API_DIR = os.getenv("LOCAL_BOT_API_DIR", "").strip()
+LOCAL_BOT_API_FILE_TTL_MIN = max(10, int(os.getenv("LOCAL_BOT_API_FILE_TTL_MIN", "60")))
+# Run ffmpeg / yt-dlp with lower CPU priority so the bot stays responsive.
+LOW_PRIORITY_MEDIA = os.getenv("LOW_PRIORITY_MEDIA", "1").strip() not in {"0", "false", "no"}
+
 # Media policy:
 #   <= SOFT_UNIQUE_SIZE_MB: unique without forced compression.
 #   SOFT_UNIQUE_SIZE_MB..MAX_UNIQUE_SIZE_MB: unique with compression to the
@@ -56,7 +70,7 @@ OVERSIZE_MAX_SIDE = int(os.getenv("OVERSIZE_MAX_SIDE", "1080"))  # short-side ca
 OVERSIZE_AUDIO_BITRATE = os.getenv("OVERSIZE_AUDIO_BITRATE", "192k").strip() or "192k"
 MAX_SOURCE_DOWNLOAD_MB = max(
     MAX_UNIQUE_SIZE_MB,
-    int(os.getenv("MAX_SOURCE_DOWNLOAD_MB", "1024")),
+    int(os.getenv("MAX_SOURCE_DOWNLOAD_MB", "700")),
 )
 # Compatibility alias: the unique-processing ceiling is 100 MB, not 1.5 GB.
 # Do not make this an independent configurable limit.

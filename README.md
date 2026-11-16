@@ -35,6 +35,14 @@ With the default configuration:
 
 The 100 MB value is the logical unique-processing threshold, not the Telegram transport limit. A local Telegram Bot API can accept larger files according to its configured capabilities.
 
+### Small VPS (1 CPU, 4 GB RAM, 10 GB disk)
+
+- New jobs are refused while free disk space is below `MIN_FREE_DISK_MB` (+ the job's own needs) with a friendly "server is busy" message.
+- Sources are capped at 700 MB and `MAX_VIDEO_MINUTES` (30); over-long links are skipped before downloading.
+- Temporary files are cleaned every 15 min (every hour-old file when the disk is low); with `LOCAL_BOT_API_DIR` set, the bot also cleans the local Bot API server's files, which that server never deletes.
+- ffmpeg / yt-dlp run with `nice`/`ionice`, so buttons stay responsive during encodes.
+- One-time server setup (swap, log limits, auto-restart): `sudo bash deploy/server_setup.sh`.
+
 ### Mini App editors (plate and text watermark)
 
 The bot serves two Telegram Mini Apps from its own process: the plate editor
