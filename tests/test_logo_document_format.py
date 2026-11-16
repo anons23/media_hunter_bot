@@ -68,7 +68,20 @@ class Mp4AnimationToGifTests(unittest.TestCase):
 
     def test_video_to_gif(self):
         out = self.tmp / "out.gif"
-        wm_wizard._video_to_gif(self._mp4(), out, 10)
+        keyed = wm_wizard._video_to_gif(self._mp4(), out, 10)
+        self.assertEqual(wm_wizard._sniff_image(out), ".gif")
+        self.assertFalse(keyed)  # colourful corners: nothing to key out
+
+    def test_black_background_becomes_transparent(self):
+        # Telegram turns a transparent GIF into MP4 with a black background.
+        path = self.tmp / "plate.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=black:size=320x80:rate=15:duration=2",
+             "-vf", "drawbox=x=20:y=10:w=280:h=60:color=0x3060FF:t=fill", "-pix_fmt", "yuv420p", str(path)],
+            check=True, capture_output=True,
+        )
+        out = self.tmp / "plate.gif"
+        self.assertTrue(wm_wizard._video_to_gif(path, out, 10))
         self.assertEqual(wm_wizard._sniff_image(out), ".gif")
 
     def _message(self, mp4: Path, as_animation: bool):

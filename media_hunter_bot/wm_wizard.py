@@ -89,27 +89,60 @@ def _convert_photo_to_png(source: Path, target: Path) -> None:
     proc = subprocess.run(["ffmpeg","-y","-i",str(source),"-frames:v","1","-vf","format=rgba",str(target)],capture_output=True,text=True,timeout=120)
     if proc.returncode != 0 or not target.exists() or target.stat().st_size <= 0: raise RuntimeError("Не удалось подготовить изображение логотипа.")
 
-def _video_to_gif(source: Path, target: Path, max_mb: int) -> None:
+def _corner_background(source: Path) -> str | None:
+    """Hex colour to key out when the animation's corners are near-black.
+
+    Telegram turns every GIF into MP4, and MP4 has no alpha: transparent
+    areas arrive as black. If all four corners of the first frame are
+    near-black, that black is the lost transparency.
+    """
+    probe = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(source), "-frames:v", "1", "-vf", "scale=64:64:flags=neighbor",
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        capture_output=True, timeout=30,
+    )
+    data = probe.stdout
+    if probe.returncode != 0 or len(data) < 64 * 64 * 3:
+        return None
+    def px(x, y):
+        i = (y * 64 + x) * 3
+        return data[i], data[i + 1], data[i + 2]
+    corners = [px(1, 1), px(62, 1), px(1, 62), px(62, 62)]
+    if all(max(c) <= 30 for c in corners):
+        return "0x000000"
+    return None
+
+
+def _video_to_gif(source: Path, target: Path, max_mb: int) -> bool:
     """Short MP4 animation -> looping GIF with its own palette.
 
     Tries a 480 px / 15 fps version first, then 320 px / 10 fps if the GIF
-    would exceed max_mb. Small inputs (logo animations) take well under a
-    second on one CPU core.
+    would exceed max_mb. When the corners are black (lost transparency), the
+    black background is keyed out so the plate is transparent again.
+    Returns True when the background was made transparent.
     """
     from .mediarun import low_priority
+    key = _corner_background(source)
     for width, fps in ((480, 15), (320, 10)):
-        vf = (
-            f"fps={fps},scale='min({width},iw)':-2:flags=lanczos,"
-            "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5"
-        )
+        if key:
+            vf = (
+                f"fps={fps},scale='min({width},iw)':-2:flags=lanczos,format=rgba,colorkey={key}:0.12:0.06,"
+                "split[a][b];[a]palettegen=reserve_transparent=1:stats_mode=full[p];"
+                "[b][p]paletteuse=alpha_threshold=128:dither=bayer:bayer_scale=5"
+            )
+        else:
+            vf = (
+                f"fps={fps},scale='min({width},iw)':-2:flags=lanczos,"
+                "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5"
+            )
         cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(source), "-t", str(MAX_LOGO_GIF_SECONDS),
-               "-an", "-vf", vf, "-loop", "0", str(target)]
+               "-an", "-vf", vf, "-gifflags", "-offsetting-transdiff", "-loop", "0", str(target)]
         proc = subprocess.run(low_priority(cmd), capture_output=True, text=True, timeout=120)
         if proc.returncode != 0 or not target.exists() or target.stat().st_size <= 0:
             logger.warning("LOGO_MP4_TO_GIF failed: %s", (proc.stderr or "")[:300])
             raise ValueError("Не удалось превратить анимацию в GIF. Пришлите GIF или PNG.")
         if target.stat().st_size <= max_mb * 1024 * 1024:
-            return
+            return bool(key)
     raise ValueError(f"После перевода в GIF файл больше {max_mb} МБ. Пришлите анимацию покороче или поменьше.")
 
 
@@ -243,11 +276,11 @@ async def _download_logo_message(message: Message, bot) -> tuple[Path,str]:
                     raise ValueError(f"Анимация слишком длинная: {seconds:.0f} с. Максимум {MAX_LOGO_GIF_SECONDS:.0f} с.")
                 gif = LOGO_DIR/f".upload_{uid}_{token}.gif"
                 try:
-                    await asyncio.to_thread(_video_to_gif, raw, gif, MAX_LOGO_GIF_MB)
+                    keyed = await asyncio.to_thread(_video_to_gif, raw, gif, MAX_LOGO_GIF_MB)
                 except Exception:
                     gif.unlink(missing_ok=True); raise
                 raw.unlink(missing_ok=True); raw = gif
-                real = ".gif"; converted = True
+                real = ".gif"; converted = "keyed" if keyed else True
                 logger.info("LOGO_MP4_TO_GIF uid=%s seconds=%.1f size=%s", uid, seconds, gif.stat().st_size)
             if real is None:
                 raise ValueError("Файл не похож на PNG или GIF. Пришлите настоящий PNG или GIF.")
@@ -264,6 +297,8 @@ async def _download_logo_message(message: Message, bot) -> tuple[Path,str]:
                 raise ValueError(f"GIF слишком длинный: {seconds:.0f} с. Максимум {MAX_LOGO_GIF_SECONDS:.0f} с.")
         logger.info("LOGO_VALIDATED uid=%s path=%s format=%s",uid,final.name,final.suffix[1:].upper())
         # MP4 has no alpha channel, so a converted GIF has a solid background.
+        if converted == "keyed":
+            return final, "GIF, чёрный фон убран"
         return final, ("GIF из видео, без прозрачного фона" if converted else final.suffix[1:].upper())
     except Exception:
         raw.unlink(missing_ok=True); raise
