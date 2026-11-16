@@ -552,7 +552,7 @@ class Engine:
             else:
                 await progress.start()
                 source = j.source
-                media_title = "video"
+                media_title = upload_title(source) if source else "video"
             if not source or not source.exists():
                 raise RuntimeError("Исходный файл не найден")
             if j.generation != self.gen.get(j.uid, 0):
@@ -639,7 +639,9 @@ class Engine:
 
             mediarun.progress_sink.set(None)
             meta = await asyncio.to_thread(metadata, source)
-            caption = str(meta.get("description") or media_title or meta.get("title") or "")[:900]
+            # A user's own file has no real title: don't caption it "video" or "IMG_1234".
+            caption_title = media_title if j.url else ""
+            caption = str(meta.get("description") or caption_title or "")[:900]
             result_size = (await asyncio.to_thread(result.stat)).st_size
             if not audio_only and size > max_unique_limit:
                 # Oversize results go through the local Bot API (up to 2 GB).
@@ -1047,6 +1049,17 @@ def _upload_media(m: Message):
     return doc.file_id, doc.file_size, suffix if suffix in _VIDEO_DOC_EXTS else ".mp4"
 
 
+def _upload_file_name(m: Message) -> str:
+    media = m.video or m.document
+    return str(getattr(media, "file_name", None) or "")
+
+
+def upload_title(source: Path) -> str:
+    """Title for a user's own file: its original name, if Telegram had one."""
+    stem = source.stem
+    return "video" if not stem or stem == "upload" else stem
+
+
 @router.message(StateFilter(None), F.video)
 @router.message(StateFilter(None), F.document, is_video_document)
 async def upload(m: Message, bot: Bot, engine: Engine):
@@ -1066,7 +1079,8 @@ async def upload(m: Message, bot: Bot, engine: Engine):
         return
     p = MEDIA_DIR / f"upload_{m.from_user.id}_{uuid.uuid4().hex}"
     p.mkdir(parents=True, exist_ok=True)
-    dst = p / f"upload{suffix}"
+    # Keep the user's own file name: the result is sent back under it.
+    dst = p / safe_media_filename(Path(_upload_file_name(m)).stem or "upload", suffix)
     handed = False
     try:
         f = await asyncio.wait_for(bot.get_file(file_id), timeout=60)

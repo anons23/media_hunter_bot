@@ -4,13 +4,25 @@ from __future__ import annotations
 from aiogram import F
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
+from .config import MAX_SOURCE_DOWNLOAD_MB, MAX_VIDEO_MINUTES
+
+
+def _minutes(value: float) -> str:
+    return f"{value:g} минут" if value > 0 else "любой длины"
+
 
 ABOUT_TEXT = (
     "🤖 <b>Media Hunter — возможности</b>\n\n"
-    "📥 <b>Скачать</b>\n"
-    "• YouTube, TikTok и Instagram по ссылке\n"
+    "📥 <b>Скачать по ссылке</b>\n"
+    "• YouTube и Shorts, TikTok, Instagram Reels\n"
+    "• VK Видео и Клипы, Rutube, Дзен, Одноклассники\n"
+    "• X (Twitter), Reddit, Pinterest, Likee, Twitch-клипы, Vimeo, SoundCloud\n"
+    "• …и ещё сотни сайтов — просто пришлите ссылку\n"
     "• YouTube-плейлисты — по одному видео\n"
-    "• Можно отправить своё видео\n\n"
+    f"• Видео до {_minutes(MAX_VIDEO_MINUTES)}; если файл больше {MAX_SOURCE_DOWNLOAD_MB} МБ — предложим качество пониже\n"
+    "• Можно отправить своё видео\n"
+    "🔓 Скачиваем только <b>общедоступные</b> видео. Закрытые профили, приватные "
+    "видео и платный контент недоступны.\n\n"
     "💧 <b>Водяной знак</b>\n"
     "• Плашка: картинка или GIF — место, размер, прозрачность и время показа\n"
     "• Надпись: 15 шрифтов, любые цвета, тень, контур или подложка\n"
@@ -20,8 +32,7 @@ ABOUT_TEXT = (
     "• Premium — до 3 каналов\n"
     "• Для каждого канала можно настроить свой водяной знак\n\n"
     "🛡 <b>Уникализация</b>\n"
-    "• Обычные видео до 100 МБ (больше — отдаём оригинал или мягко сжимаем)\n"
-    "• Видео длительностью до 30 минут\n"
+    "• Обычные видео до 100 МБ (более крупные отправляем без уникализации)\n"
     "• Видео из плейлиста — до 80 МБ на видео\n\n"
     "🆓 <b>Free</b>\n"
     "• До 10 задач в очереди\n"

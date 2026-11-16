@@ -9,6 +9,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import subprocess
 import time
@@ -237,10 +238,57 @@ def safe_media_filename(title: str, ext: str = ".mp4") -> str:
     name = " ".join(name.split())
     name = name.strip(" .") or "video"
     if len(name) > 80:
-        name = name[:80].rstrip(" .")
+        cut = name[:80]
+        # Cut at a word boundary when there is one reasonably close.
+        space = cut.rfind(" ")
+        name = (cut[:space] if space >= 40 else cut).rstrip(" .,-–—")
     if not ext.startswith("."):
         ext = f".{ext}"
     return f"{name}{ext}"
+
+
+_URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+_TAG_RE = re.compile(r"(?<!\w)[#@][\w.]+", re.UNICODE)
+# Titles that some extractors fill with a placeholder instead of a real name.
+_GENERIC_TITLE_RE = re.compile(
+    r"^(?:(?:video|reel|post|clip|story|photo|видео|клип|пост)(?:\s+(?:by|from|от)\s+.*)?"
+    r"|(?:tiktok|instagram|youtube|vk|twitter|x|facebook|reddit|pinterest|likee)(?:\s+(?:video|post|reel|clip))?"
+    r"(?:\s+#?\d+)?(?:\s+(?:by|from)\s+.*)?"
+    r"|untitled|без названия|\d+)$",
+    re.IGNORECASE,
+)
+
+
+def clean_title(text: str) -> str:
+    """Strip links, #hashtags and @mentions; keep the first meaningful line."""
+    for line in str(text or "").splitlines():
+        line = _TAG_RE.sub(" ", _URL_RE.sub(" ", line))
+        line = " ".join(line.split()).strip(" .,:;-–—|")
+        if sum(ch.isalnum() for ch in line) >= 3:
+            return line
+    return ""
+
+
+def pick_title(data: dict) -> str:
+    """Human file name for a downloaded video from yt-dlp's info dict.
+
+    Instagram titles look like "Video by account", TikTok/VK clip titles are
+    the caption full of hashtags and links. Prefer a real title, then the
+    caption's first line, then "author id".
+    """
+    vid = str(data.get("id") or "").strip()
+    for key in ("title", "fulltitle", "alt_title", "track"):
+        raw = str(data.get(key) or "").strip()
+        title = clean_title(raw)
+        if title and title != vid and not _GENERIC_TITLE_RE.match(title):
+            return title[:200]
+    description = clean_title(data.get("description") or "")
+    if description and not _GENERIC_TITLE_RE.match(description):
+        return description[:200]
+    author = clean_title(str(data.get("uploader") or data.get("channel") or data.get("uploader_id") or ""))
+    site = str(data.get("extractor_key") or data.get("extractor") or "").split(":")[0]
+    parts = [p for p in (author, site if not author else "", vid) if p]
+    return " ".join(parts)[:200]
 
 
 def _title_from_info_json(work_dir: Path) -> str:
@@ -249,9 +297,10 @@ def _title_from_info_json(work_dir: Path) -> str:
             data = json.loads(info.read_text(encoding="utf-8", errors="replace"))
         except Exception:
             continue
-        title = str(data.get("title") or data.get("fulltitle") or "").strip()
-        if title:
-            return title[:200]
+        if isinstance(data, dict):
+            title = pick_title(data)
+            if title:
+                return title
     return ""
 
 
