@@ -33,6 +33,17 @@ With the default configuration:
   - results are sent through the local Bot API up to `TELEGRAM_MAX_UPLOAD_MB` (2000 MB); send request timeout scales with file size;
 - source/user uploads are capped at **1024 MB (1 GB)** by default.
 
+### Quality choice for big links
+
+Before downloading a single link the bot reads the format list from yt-dlp (no
+download, ~2 s). If the default 1080p pick is larger than
+`MAX_SOURCE_DOWNLOAD_MB`, the user gets buttons with lower qualities that fit
+(720p/480p/… with an estimated size). The chosen quality is downloaded as is,
+without re-encoding. When the size is only a rough estimate (HLS streams), a
+"try the best quality" button is offered too; the download still enforces the
+real limit. Playlist items and uploaded files are not affected
+(`media_hunter_bot/quality.py`).
+
 The 100 MB value is the logical unique-processing threshold, not the Telegram transport limit. A local Telegram Bot API can accept larger files according to its configured capabilities.
 
 ### Small VPS (1 CPU, 4 GB RAM, 10 GB disk)

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import COOKIES_PATH, LOGO_DIR, MAX_WATERMARK_MB, MAX_WATERMARK_PX, MEDIA_DIR, MAX_SOURCE_DOWNLOAD_MB, MAX_VIDEO_MINUTES
+from . import quality
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +289,7 @@ def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> tuple
         "--no-playlist",
         "--no-warnings",
         "-f",
-        "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]/best",
+        quality.format_selector(quality.MAX_HEIGHT.get()),
         "--merge-output-format",
         "mp4",
         "--max-filesize",
@@ -300,7 +301,9 @@ def download(url: str, work_dir: Path, register: Callable[[Any], None]) -> tuple
     ]
     if MAX_VIDEO_MINUTES > 0:
         # Skip over-long videos before downloading them (saves disk and CPU).
-        cmd.extend(["--match-filter", f"!duration | duration <= {int(MAX_VIDEO_MINUTES * 60)}"])
+        # "<=?" also lets through videos without a known duration; the old
+        # "!duration | duration <= N" form is rejected by yt-dlp as invalid.
+        cmd.extend(["--match-filter", f"duration <=? {int(MAX_VIDEO_MINUTES * 60)}"])
     if COOKIES_PATH.exists():
         cmd.extend(["--cookies", str(COOKIES_PATH)])
     cmd.append(url)

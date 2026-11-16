@@ -106,6 +106,12 @@ def ensure_disk_space(need_mb: int = 0) -> None:
         raise RuntimeError(BUSY_DISK_TEXT)
 
 
+def _is_playlist_item() -> bool:
+    """Playlist items have their own 80 MB guard; no quality choice for them."""
+    from .playlist_support import _PLAYLIST_DOWNLOAD_GUARD
+    return _PLAYLIST_DOWNLOAD_GUARD.get()
+
+
 def format_wait(seconds: float) -> str:
     minutes = max(1, round(seconds / 60))
     return f"~{minutes} мин" if minutes < 60 else f"~{minutes // 60} ч {minutes % 60} мин"
@@ -150,6 +156,7 @@ def upload_timeout(path: Path) -> int:
         size_mb = 0
     return int(min(3600, max(120, 60 + size_mb * 2)))
 from .progress import ProgressTracker
+from . import quality
 from . import plate as plate_mod
 from . import webapp
 from . import mediarun
@@ -522,9 +529,25 @@ class Engine:
                     else:
                         await self.bot.send_message(j.uid, f"📚 Плейлист: {len(jobs)} видео добавлено в очередь.")
                     return
+                source_url = items[0] if len(items) == 1 else j.url
+                height = None
+                if not _is_playlist_item():
+                    height = quality.take_choice(j.uid, j.url)
+                    if height is None:
+                        # Too big in 1080p? Offer lower qualities instead of failing.
+                        info = await asyncio.to_thread(quality.probe, source_url)
+                        plan = quality.plan(info) if info else None
+                        if plan is not None:
+                            if not quality.needs_choice(plan):
+                                raise RuntimeError(quality.choice_text(plan))
+                            token = quality.offer(j.uid, j.url)
+                            rows = [[B(text, data) for text, data in row] for row in quality.choice_rows(token, plan)]
+                            logger.info("QUALITY_CHOICE uid=%s best_mb=%s options=%s", j.uid, plan.best_mb, plan.options)
+                            await self.bot.send_message(j.uid, quality.choice_text(plan), reply_markup=kb(rows))
+                            return
+                quality.MAX_HEIGHT.set(height)
                 await progress.start()
                 await progress.advance("download")
-                source_url = items[0] if len(items) == 1 else j.url
                 source, media_title = await asyncio.to_thread(download, source_url, work, register)
             else:
                 await progress.start()
@@ -961,6 +984,38 @@ async def url_message(m: Message, bot: Bot, engine: Engine):
         await m.answer(queued_text(engine, m.from_user.id, "Ссылка принята"))
     except (RuntimeError, ValueError) as e:
         await m.answer(f"❌ {user_facing_error(e)}")
+
+
+@router.callback_query(F.data.startswith("q:"))
+async def quality_pick(c: CallbackQuery, engine: Engine):
+    """User picked a lower quality for a link that is too big in 1080p."""
+    parts = (c.data or "").split(":")
+    if len(parts) != 3:
+        await c.answer()
+        return
+    _, token, choice = parts
+    url = quality.take_offer(token, c.from_user.id)
+    if url is None:
+        await c.answer("Выбор устарел — пришлите ссылку ещё раз.", show_alert=True)
+        return
+    if choice == "x":
+        await c.answer()
+        await c.message.edit_text("✖️ Скачивание отменено.")
+        return
+    try:
+        height = int(choice)
+    except ValueError:
+        await c.answer()
+        return
+    await c.answer(f"{height}p")
+    quality.remember_choice(c.from_user.id, url, height)
+    try:
+        ensure_disk_space()
+        await engine.add(c.from_user.id, url=url)
+        await c.message.edit_text(queued_text(engine, c.from_user.id, f"Качество {height}p выбрано"))
+    except (RuntimeError, ValueError) as e:
+        quality.forget_choice(c.from_user.id, url)
+        await c.message.edit_text(f"❌ {user_facing_error(e)}")
 
 
 @router.callback_query(F.data == "upload")
