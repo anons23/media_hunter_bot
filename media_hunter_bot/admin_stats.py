@@ -84,7 +84,8 @@ def touch_user_sync(uid: int) -> None:
 
 async def touch_user(uid: int) -> None:
     now = time.monotonic()
-    if now - _last_touch.get(uid, 0) < TOUCH_EVERY_S:
+    last = _last_touch.get(uid)
+    if last is not None and now - last < TOUCH_EVERY_S:
         return
     _last_touch[uid] = now
     if len(_last_touch) > 50_000:
