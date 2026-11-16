@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import html
 from datetime import datetime, timedelta, timezone
 
-from aiogram import BaseMiddleware, F, Router
+from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -162,32 +163,14 @@ def _list_sync() -> list[dict]:
     return result
 
 
-class _AdminPremiumMenuMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event: CallbackQuery, data: dict):
-        result = await handler(event, data)
-        if event.from_user and event.from_user.id == ADMIN_ID and event.data == "admin" and event.message:
-            try:
-                await event.message.edit_reply_markup(
-                    reply_markup=_kb([
-                        [_B("🎁 Управление Premium", "admin_premium")],
-                        [_B("🔐 ОПП", "aopp")],
-                        [_B("📊 Отчёты ОПП", "aopp_reports")],
-                        [_B("⏱ Срок хранения ОПП", "aopp_retain")],
-                        [_B("📣 Реклама", "aad")],
-                        [_B("💎 Ссылка Stars", "astars")],
-                        [_B("🔄 Обновить yt-dlp", "aytdlp")],
-                        [_B("🔄 Перезапустить бота", "abot")],
-                        [_B("◀️ Назад", "back")],
-                    ])
-                )
-            except Exception:
-                pass
-        return result
-
-
 def register_admin_premium(router: Router) -> None:
-    """Register admin-only manual Premium controls."""
-    router.callback_query.middleware(_AdminPremiumMenuMiddleware())
+    """Register admin-only manual Premium controls.
+
+    The "🎁 Управление Premium" button lives in the admin menu in handlers.py.
+    """
+    if getattr(router, "_media_hunter_admin_premium", False):
+        return
+    router._media_hunter_admin_premium = True
 
     @router.callback_query(F.data == "admin_premium")
     async def admin_premium(c: CallbackQuery, state: FSMContext):
@@ -293,7 +276,7 @@ def register_admin_premium(router: Router) -> None:
         else:
             lines = ["📋 <b>Premium, выданный администратором</b>", ""]
             for grant in grants[:30]:
-                name = grant.get("username") or grant.get("first_name") or "без имени"
+                name = html.escape(str(grant.get("username") or grant.get("first_name") or "без имени"))
                 until = _parse_dt(grant.get("grant_until"))
                 until_text = until.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if until else "—"
                 lines.append(f"👤 {grant['user_id']} — {name}\n⏳ До: {until_text}")

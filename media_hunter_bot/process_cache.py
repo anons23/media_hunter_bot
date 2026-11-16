@@ -94,10 +94,22 @@ def _use_first_channel_watermark(work: Path, watermark: Any) -> dict[str, Any]:
     return _first_channel_watermark(work)
 
 
-def _remember(key: tuple[str, str, bool, bool], result: Path) -> None:
-    if len(_cache) >= _MAX_ENTRIES:
-        _cache.pop(next(iter(_cache)))
-    _cache[key] = result
+def _prune(cache: dict) -> None:
+    """Drop entries whose job work dir is gone, then cap the size.
+
+    Work dirs are removed after every job, so stale entries otherwise
+    accumulated for the whole process lifetime (_base_cache had no cap).
+    """
+    for k in [k for k, v in cache.items() if not Path(v).exists()]:
+        cache.pop(k, None)
+    while len(cache) >= _MAX_ENTRIES:
+        cache.pop(next(iter(cache)))
+
+
+def _remember(key: tuple[str, str, bool, bool], result: Path, cache: dict | None = None) -> None:
+    cache = _cache if cache is None else cache
+    _prune(cache)
+    cache[key] = result
 
 
 def cached_process_media(
@@ -180,7 +192,7 @@ def cached_process_media(
             except OSError:
                 frozen = base_result
         base_result = frozen
-        _base_cache[key] = base_result
+        _remember(key, base_result, _base_cache)
         logger.info("UNIQUE_BASE_READY work=%s file=%s", work, base_result.name)
     else:
         logger.info("UNIQUE_BASE_HIT work=%s file=%s", work, base_result.name)
@@ -189,7 +201,7 @@ def cached_process_media(
         return base_result
 
     variant = apply_watermark(base_result, work, dict(effective_watermark), compress, register)
-    _cache[key] = variant
+    _remember(key, variant)
     return variant
 
 

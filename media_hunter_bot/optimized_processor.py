@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import processor as base
+from .config import SOFT_UNIQUE_SIZE_MB
 from .unique_filter import unique_video_filters
 
 _UNIQUE_AUDIO_FILTER = "volume=1.02,highpass=f=40,lowpass=f=16000"
@@ -75,16 +76,42 @@ def _validate_processed_media(path: Path, audio_only: bool) -> None:
             raise RuntimeError("Обработанный файл имеет некорректные размеры кадра.")
 
 
-def _run_ffmpeg(cmd: list[str], output: Path, work_dir: Path, register: Callable[[Any], None]) -> Path:
+_MIN_TIMEOUT = 10 * 60
+_MAX_TIMEOUT = 3 * 60 * 60
+
+
+def _input_duration(cmd: list[str]) -> float:
+    """Duration of the first ffmpeg input, 0 if unknown."""
+    try:
+        info, _ = base.ffprobe(Path(cmd[cmd.index("-i") + 1]))
+        return max(0.0, float((info.get("format") or {}).get("duration") or 0))
+    except Exception:
+        return 0.0
+
+
+def _timeout_for(duration: float) -> int:
+    """Scale the ffmpeg timeout with media length (10 min .. 3 h)."""
+    return int(min(_MAX_TIMEOUT, max(_MIN_TIMEOUT, duration * 2)))
+
+
+def _run_ffmpeg(
+    cmd: list[str],
+    output: Path,
+    work_dir: Path,
+    register: Callable[[Any], None],
+    timeout: int | None = None,
+) -> Path:
+    if timeout is None:
+        timeout = _timeout_for(_input_duration(cmd))
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
         register(proc)
         try:
-            _, stderr = proc.communicate(timeout=600)
+            _, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
-            base.logger.warning("ffmpeg timed out (10 min) for work_dir=%s", work_dir)
-            raise RuntimeError("Не удалось обработать медиа. Файл повреждён или формат не поддерживается.")
+            base.logger.warning("ffmpeg timed out (%ss) for work_dir=%s", timeout, work_dir)
+            raise RuntimeError("Превышено время ожидания при обработке видео. Попробуйте позже или пришлите видео короче.")
         finally:
             register(None)
         if proc.returncode != 0:
@@ -116,9 +143,49 @@ def process_media(
         ]
         return _run_ffmpeg(cmd, output, work_dir, register)
 
+    output = work_dir / "output.mp4"
+    if not compress:
+        cmd = _video_cmd(source, output, watermark, work_dir, crf=27)
+        return _run_ffmpeg(cmd, output, work_dir, register)
+
+    # 80–100 MB path: must land under the soft target. Step down gently
+    # instead of failing after the first attempt.
+    target = SOFT_UNIQUE_SIZE_MB * 1024 * 1024
+    timeout = _timeout_for(_input_duration(["-i", str(source)]))
+    result = output
+    for attempt, (crf, max_side) in enumerate(_COMPRESS_STEPS, start=1):
+        cmd = _video_cmd(source, output, watermark, work_dir, crf=crf, max_side=max_side)
+        result = _run_ffmpeg(cmd, output, work_dir, register, timeout=timeout)
+        size = result.stat().st_size
+        if size <= target:
+            if attempt > 1:
+                base.logger.info("UNIQUE_COMPRESS_STEP_OK attempt=%s crf=%s side=%s size=%s", attempt, crf, max_side, size)
+            return result
+        base.logger.info("UNIQUE_COMPRESS_TOO_BIG attempt=%s crf=%s side=%s size=%s target=%s", attempt, crf, max_side, size, target)
+    return result
+
+
+# (crf, short-side cap) for the compress path; None = keep resolution.
+_COMPRESS_STEPS: tuple[tuple[int, int | None], ...] = ((30, None), (33, None), (33, 720))
+
+
+def _side_cap_filter(max_side: int) -> str:
+    return (
+        f"scale=w='if(gte(iw,ih),-2,min({max_side},trunc(iw/2)*2))'"
+        f":h='if(gte(iw,ih),min({max_side},trunc(ih/2)*2),-2)'"
+    )
+
+
+def _video_cmd(
+    source: Path,
+    output: Path,
+    watermark: dict[str, Any],
+    work_dir: Path,
+    crf: int,
+    max_side: int | None = None,
+) -> list[str]:
     logo = base._logo_path(watermark) if watermark.get("type") == "image" else None
     has_text = watermark.get("type") == "text" and bool(watermark.get("text"))
-    output = work_dir / "output.mp4"
     cmd = ["ffmpeg", "-y", "-i", str(source)]
     if logo:
         cmd += ["-i", str(logo)]
@@ -127,8 +194,10 @@ def process_media(
         "-c:a", "aac", "-b:a", _AUDIO_BITRATE, "-ar", "48000", "-ac", "2",
         "-movflags", "+faststart", "-map_metadata", "-1", "-metadata", "comment=media_hunter",
     ]
-    cmd += ["-crf", "30", "-preset", "superfast"] if compress else ["-crf", "27", "-preset", "superfast"]
+    cmd += ["-crf", str(crf), "-preset", "superfast"]
     base_vf = _unique_video_filters()
+    if max_side:
+        base_vf = f"{base_vf},{_side_cap_filter(max_side)}"
     if logo:
         pct = max(5, min(int(watermark.get("logo_size", 20)), 80)) / 100.0
         opacity = max(0.05, min(float(watermark.get("logo_opacity", 0.8)), 1.0))
@@ -147,7 +216,7 @@ def process_media(
                 vf_parts.append(text_filter)
         cmd += ["-vf", ",".join(vf_parts), "-af", _UNIQUE_AUDIO_FILTER]
     cmd.append(str(output))
-    return _run_ffmpeg(cmd, output, work_dir, register)
+    return cmd
 
 
 def apply_watermark(

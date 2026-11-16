@@ -63,7 +63,7 @@ class MediaUniquenessRegressionTests(unittest.TestCase):
     def test_video_encoder_is_cpu_bounded_and_fast_preset(self):
         from media_hunter_bot import optimized_processor
 
-        source = inspect.getsource(optimized_processor.process_media)
+        source = inspect.getsource(optimized_processor._video_cmd)
         self.assertIn('"-threads", "2"', source)
         self.assertTrue('"-preset", "veryfast"' in source or '"-preset", "superfast"' in source)
 

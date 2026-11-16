@@ -64,6 +64,8 @@ from .config import (
     MEDIA_DIR,
     PREMIUM_PLANS,
     TELEGRAM_MAX_UPLOAD_MB,
+    FREE_MAX_CHANNELS,
+    PREMIUM_MAX_CHANNELS,
 )
 from . import db
 from .processor import (
@@ -96,6 +98,7 @@ def upload_timeout(path: Path) -> int:
 from .progress import ProgressTracker
 from .opp_logic import opp_check
 from .opp_admin import register_opp_admin
+from .admin_premium import register_admin_premium
 from .wm_wizard import register_wm_wizard
 from .user_errors import user_facing_error
 router = Router()
@@ -113,7 +116,23 @@ class ThrottlingMiddleware(BaseMiddleware):
         self._last: dict[int, float] = {}
         self._req_count = 0
 
+    @staticmethod
+    def _is_work_item(event: TelegramObject) -> bool:
+        """Media and links are never dropped: queue limits protect the bot.
+
+        Forwarding several videos/links at once arrives faster than the rate
+        limit; throttling them silently lost every item but the first.
+        """
+        if not isinstance(event, Message):
+            return False
+        if event.video or event.document or event.animation or event.photo:
+            return True
+        text = (event.text or "").lstrip()
+        return text.startswith(("http://", "https://"))
+
     async def __call__(self, handler, event: TelegramObject, data: dict):
+        if self._is_work_item(event):
+            return await handler(event, data)
         uid = None
         if isinstance(event, Message) and event.from_user:
             uid = event.from_user.id
@@ -171,6 +190,7 @@ def menu(uid: int) -> InlineKeyboardMarkup:
 
 register_opp_admin(router, menu)
 register_wm_wizard(router, menu)
+register_admin_premium(router)
 
 
 def premium_menu() -> InlineKeyboardMarkup:
@@ -522,6 +542,10 @@ class Engine:
                 if not ch["enabled"]:
                     continue
                 try:
+                    if not await user_can_manage_channel(self.bot, ch["channel_id"], j.uid):
+                        # Channels attached before the ownership check, or the
+                        # user lost admin rights: never post on their behalf.
+                        raise ValueError("Вы больше не администратор этого канала.")
                     if audio_only:
                         cr = result
                     elif size > max_unique_limit:
@@ -531,12 +555,17 @@ class Engine:
                         cr = result
                     else:
                         channel_wm = await db.aget_channel_watermark(ch["channel_id"], j.uid)
-                        cr = await asyncio.to_thread(process_media, source, work, channel_wm, audio_only=False, compress=False, register=register)
+                        # Same compress flag as the private result, so the
+                        # per-job cache reuses it instead of a second
+                        # uniqueness pass (80–100 MB sources were encoded twice).
+                        unique_compress = size > soft_unique_limit
+                        cr = await asyncio.to_thread(process_media, source, work, channel_wm, audio_only=False, compress=unique_compress, register=register)
                         cr_size = (await asyncio.to_thread(cr.stat)).st_size
-                        if cr_size > MAX_SEND_MB * 1024 * 1024:
+                        if cr_size > MAX_SEND_MB * 1024 * 1024 and not unique_compress:
                             cr = await asyncio.to_thread(process_media, source, work, channel_wm, audio_only=False, compress=True, register=register)
-                            if (await asyncio.to_thread(cr.stat)).st_size > MAX_SEND_MB * 1024 * 1024:
-                                raise RuntimeError(f"После сжатия файл для канала всё ещё превышает лимит отправки {MAX_SEND_MB} МБ")
+                            cr_size = (await asyncio.to_thread(cr.stat)).st_size
+                        if cr_size > MAX_SEND_MB * 1024 * 1024:
+                            raise RuntimeError(f"После сжатия файл для канала всё ещё превышает лимит отправки {MAX_SEND_MB} МБ")
                     if cr.suffix.lower() == ".mp3":
                         await self.bot.send_audio(ch["channel_id"], FSInputFile(cr, filename=safe_media_filename(media_title, cr.suffix or ".mp3")), request_timeout=upload_timeout(cr))
                     else:
@@ -643,8 +672,10 @@ class Engine:
 @router.message(CommandStart())
 async def start(m: Message, bot: Bot, state: FSMContext):
     await state.clear()
+    # Referrals count only for users who open the bot for the first time.
+    is_new_user = await db.aget_user(m.from_user.id) is None
     await db.aensure_user(m.from_user.id, m.from_user.username, m.from_user.first_name)
-    if m.text:
+    if m.text and is_new_user:
         parts = m.text.split(maxsplit=1)
         if len(parts) == 2 and parts[1].startswith("ref_"):
             try:
@@ -816,9 +847,33 @@ async def upload_menu(c: CallbackQuery, state: FSMContext):
     await c.message.edit_text(f"📤 Отправьте видео до {MAX_USER_UPLOAD_MB} МБ.", reply_markup=kb([[B("◀️ Назад", "back")]]))
 
 
+_VIDEO_DOC_EXTS = (".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi")
+
+
+def is_video_document(m: Message) -> bool:
+    """A video sent "as file" arrives as Message.document, not Message.video."""
+    doc = m.document
+    if doc is None:
+        return False
+    mime = (doc.mime_type or "").lower()
+    name = (doc.file_name or "").lower()
+    return mime.startswith("video/") or name.endswith(_VIDEO_DOC_EXTS)
+
+
+def _upload_media(m: Message):
+    """Return (file_id, file_size, suffix) for a video or a video document."""
+    if m.video:
+        return m.video.file_id, m.video.file_size, ".mp4"
+    doc = m.document
+    suffix = Path((doc.file_name or "").lower()).suffix
+    return doc.file_id, doc.file_size, suffix if suffix in _VIDEO_DOC_EXTS else ".mp4"
+
+
 @router.message(StateFilter(None), F.video)
+@router.message(StateFilter(None), F.document, is_video_document)
 async def upload(m: Message, bot: Bot, engine: Engine):
-    if m.video.file_size is not None and m.video.file_size > MAX_USER_UPLOAD_MB * 1024 * 1024:
+    file_id, file_size, suffix = _upload_media(m)
+    if file_size is not None and file_size > MAX_USER_UPLOAD_MB * 1024 * 1024:
         await m.answer(f"❌ Максимальный размер файла — {MAX_USER_UPLOAD_MB} МБ.")
         return
     missing, rows = await opp_check(bot, m.from_user.id, m.from_user.username)
@@ -833,11 +888,11 @@ async def upload(m: Message, bot: Bot, engine: Engine):
         return
     p = MEDIA_DIR / f"upload_{m.from_user.id}_{uuid.uuid4().hex}"
     p.mkdir(parents=True, exist_ok=True)
-    dst = p / "upload.mp4"
+    dst = p / f"upload{suffix}"
     handed = False
     try:
-        f = await asyncio.wait_for(bot.get_file(m.video.file_id), timeout=60)
-        await asyncio.wait_for(bot.download_file(f.file_path, destination=dst), timeout=300)
+        f = await asyncio.wait_for(bot.get_file(file_id), timeout=60)
+        await asyncio.wait_for(bot.download_file(f.file_path, destination=dst, timeout=900), timeout=900)
         actual_size = dst.stat().st_size
         if actual_size > MAX_USER_UPLOAD_MB * 1024 * 1024:
             raise RuntimeError(f"Файл превышает абсолютный лимит {MAX_USER_UPLOAD_MB} МБ")
@@ -869,18 +924,41 @@ async def channels(c: CallbackQuery, state: FSMContext):
     for ch in await db.alist_channels(c.from_user.id):
         rows.append([B(f'{"🟢" if ch["enabled"] else "⚪"} {ch["title"] or ch["channel_id"]}', f'ch:{ch["channel_id"]}')])
     rows.append([B("◀️ Назад", "back")])
+    limit = await channel_limit(c.from_user.id)
     await c.answer()
-    await c.message.edit_text("📺 Каналы (максимум 3):", reply_markup=kb(rows))
+    await c.message.edit_text(f"📺 Каналы (максимум {limit}):", reply_markup=kb(rows))
+
+
+async def channel_limit(uid: int) -> int:
+    return PREMIUM_MAX_CHANNELS if await db.ais_premium(uid) else FREE_MAX_CHANNELS
+
+
+async def user_can_manage_channel(bot: Bot, chat_id: int, user_id: int) -> bool:
+    """True only for the channel creator or an admin allowed to post."""
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+    except (TelegramBadRequest, TelegramForbiddenError):
+        return False
+    status = getattr(member.status, "value", member.status)
+    if status == "creator":
+        return True
+    if status == "administrator":
+        return bool(getattr(member, "can_post_messages", True))
+    return False
 
 
 @router.callback_query(F.data == "addch")
 async def addch(c: CallbackQuery, state: FSMContext):
-    if len(await db.alist_channels(c.from_user.id)) >= 3:
-        await c.answer("Максимум 3", show_alert=True)
+    limit = await channel_limit(c.from_user.id)
+    if len(await db.alist_channels(c.from_user.id)) >= limit:
+        if limit < PREMIUM_MAX_CHANNELS:
+            await c.answer(f"Бесплатный тариф: максимум {limit} канал. С Premium — до {PREMIUM_MAX_CHANNELS}.", show_alert=True)
+        else:
+            await c.answer(f"Максимум {limit} канала", show_alert=True)
         return
     await state.set_state(S.channel)
     await c.answer()
-    await c.message.edit_text("Пришлите @username или ID канала. Бот должен быть администратором канала.", reply_markup=kb([[B("◀️ Назад", "channels")]]))
+    await c.message.edit_text("Пришлите @username или ID канала. Бот и вы должны быть администраторами канала.", reply_markup=kb([[B("◀️ Назад", "channels")]]))
 
 
 @router.message(S.channel)
@@ -891,9 +969,15 @@ async def addch_value(m: Message, state: FSMContext, bot: Bot):
             await m.answer("❌ Пришлите @username или ID канала.")
             return
         chat = await bot.get_chat(text)
+        if chat.type != "channel":
+            raise ValueError("Это не канал. Пришлите @username или ID канала.")
         me_member = await bot.get_chat_member(chat.id, bot.id)
         if me_member.status not in ("administrator", "creator"):
-            raise RuntimeError("Сначала добавьте бота в администраторы канала.")
+            raise ValueError("Сначала добавьте бота в администраторы канала.")
+        if not await user_can_manage_channel(bot, chat.id, m.from_user.id):
+            # Security: without this anyone could attach someone else's
+            # channel where the bot is admin and autopost into it.
+            raise ValueError("Подключить канал может только его владелец или администратор.")
         await db.aadd_channel(m.from_user.id, chat.id, chat.title or str(chat.id))
         await state.clear()
         await m.answer("✅ Канал добавлен.", reply_markup=menu(m.from_user.id))
@@ -979,7 +1063,7 @@ async def admin(c: CallbackQuery, state: FSMContext):
         await c.answer("Нет доступа", show_alert=True)
         return
     await c.answer()
-    await c.message.edit_text("👑 Админ-панель", reply_markup=kb([[B("🔐 ОПП", "aopp")], [B("📊 Отчёты ОПП", "aopp_reports")], [B("⏱ Срок хранения ОПП", "aopp_retain")], [B("📣 Реклама", "aad")], [B("💎 Ссылка Stars", "astars")], [B("🔄 Обновить yt-dlp", "aytdlp")], [B("🔄 Перезапустить бота", "abot")], [B("◀️ Назад", "back")]]))
+    await c.message.edit_text("👑 Админ-панель", reply_markup=kb([[B("🎁 Управление Premium", "admin_premium")], [B("🔐 ОПП", "aopp")], [B("📊 Отчёты ОПП", "aopp_reports")], [B("⏱ Срок хранения ОПП", "aopp_retain")], [B("📣 Реклама", "aad")], [B("💎 Ссылка Stars", "astars")], [B("🔄 Обновить yt-dlp", "aytdlp")], [B("🔄 Перезапустить бота", "abot")], [B("◀️ Назад", "back")]]))
 
 @router.callback_query(F.data == "aopp")
 async def aopp(c: CallbackQuery):
@@ -1163,7 +1247,7 @@ async def aytdlp(c: CallbackQuery):
         await c.answer("Нет доступа", show_alert=True)
         return
     await c.answer()
-    await c.message.edit_text("🔄 yt-dlp закреплён на версии из requirements.txt. Для ручного обновления обновите пакет на сервере и перезапустите бота.", reply_markup=kb([[B("◀️ Назад", "admin")]]))
+    await c.message.edit_text("🔄 Для обновления yt-dlp выполните на сервере:\n<code>pip install -U yt-dlp</code>\nи перезапустите бота. Рекомендуется раз в неделю (см. README).", reply_markup=kb([[B("◀️ Назад", "admin")]]), parse_mode="HTML")
 
 
 @router.callback_query(F.data == "abot")

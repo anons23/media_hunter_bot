@@ -229,7 +229,10 @@ def apply_referral(user_id: int, referrer_id: int) -> bool:
         return False
     with _db() as c:
         _ensure_user_locked(c, user_id, None, None)
-        _ensure_user_locked(c, referrer_id, None, None)
+        # The referrer must be a real bot user: do not create rows for
+        # made-up ids from crafted ref_ links.
+        if c.execute("SELECT 1 FROM users WHERE user_id=?", (referrer_id,)).fetchone() is None:
+            return False
         cur = c.execute(
             "UPDATE users SET referred_by=?, updated_at=? WHERE user_id=? AND referred_by IS NULL",
             (referrer_id, _now(), user_id),

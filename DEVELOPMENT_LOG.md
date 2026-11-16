@@ -214,3 +214,20 @@ Never record bot tokens or `.env` contents here.
 - `send_video`/`send_audio` get `request_timeout` scaled by file size (aiogram default was 60 s).
 - Tests: `tests/test_oversize_policy.py`.
 - ⬜ VPS smoke: logo upload (photo/PNG/GIF) → save → video; 110 MB video → original; 300 MB video → compressed, picture/sound OK.
+
+## Code review fixes — 2026-11-16
+1. Security: adding a channel now requires the **user** to be creator/admin (with post rights) of the channel, not only the bot; autopost re-checks it before every post (old hijacked channels stop receiving posts).
+2. Videos sent as a file (document, video/* or .mp4/.mov/.mkv/.webm/.m4v/.avi) are accepted like normal videos; container suffix kept.
+3. Throttling no longer drops media and links (several forwarded videos/links were lost); queue limits still apply.
+4. ≤100 MB unique ffmpeg timeout scales with duration (10 min … 3 h); correct timeout message.
+5. 80–100 MB: compress steps crf30 → crf33 → crf33+720p until under 80 MB; autopost uses the same compress flag, so the cached unique result is reused (no second uniqueness pass).
+6. Channel limit text follows the tariff (Free 1 / Premium 3).
+7. Referrals only for first-time users and only for existing referrers.
+8. Admin "🎁 Управление Premium" registered and added to the admin menu (first_name HTML-escaped in the list).
+9. Removed temporary `logo_debug.py` and the missing `logo_state_trace` hook.
+10. Removed `patches/` and `URGENT_RESTORE_HANDLERS.md`; root `requirements.txt` aligned with the package one (was aiogram 3.17).
+11. `yt-dlp>=2026.8.19`; update weekly with `pip install -U yt-dlp` (see README).
+12. Bot commands set to /start + /paysupport instead of being deleted on every start.
+13. Process cache prunes dead entries and caps `_base_cache`.
+- Tests: `tests/test_review_fixes.py`.
+- ⬜ VPS smoke: add own/foreign channel, send video as file, forward 3 links at once, 90 MB video with autopost, admin Premium grant.

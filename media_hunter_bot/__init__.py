@@ -96,16 +96,6 @@ def _patched_register_wm_wizard(router, menu_fn):
         _patch_logo_fallback(router)
     except Exception:
         pass
-    try:
-        from .logo_debug import patch_router as _patch_logo_debug
-        _patch_logo_debug(router)
-    except Exception:
-        pass
-    try:
-        from .logo_state_trace import patch_router as _patch_logo_state_trace
-        _patch_logo_state_trace(router)
-    except Exception:
-        pass
     return result
 
 
@@ -119,18 +109,24 @@ _wm_wizard._MainMenuInfoMiddleware.__call__ = _patched_middleware_call
 from aiogram import Bot as _Bot
 _original_bot_get_me = _Bot.get_me
 
+# Visible bot commands. /paysupport must stay listed for Telegram Stars
+# payments; set_my_commands also replaces any legacy commands.
+_BOT_COMMANDS = (("start", "Главное меню"), ("paysupport", "Вопросы по оплате"))
 
-async def _get_me_and_clear_legacy_commands(self, *args, **kwargs):
+
+async def _get_me_and_set_commands(self, *args, **kwargs):
     result = await _original_bot_get_me(self, *args, **kwargs)
-    try:
-        await self.delete_my_commands()
-    except Exception:
-        pass
-
+    if not getattr(self, "_media_hunter_commands_set", False):
+        try:
+            from aiogram.types import BotCommand
+            await self.set_my_commands([BotCommand(command=c, description=d) for c, d in _BOT_COMMANDS])
+            self._media_hunter_commands_set = True
+        except Exception:
+            pass
     return result
 
 
-_Bot.get_me = _get_me_and_clear_legacy_commands
+_Bot.get_me = _get_me_and_set_commands
 
 del _processor
 del _safe_unique_video_filters

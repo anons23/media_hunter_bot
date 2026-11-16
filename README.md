@@ -35,6 +35,16 @@ With the default configuration:
 
 The 100 MB value is the logical unique-processing threshold, not the Telegram transport limit. A local Telegram Bot API can accept larger files according to its configured capabilities.
 
+### Keeping yt-dlp fresh
+
+Sites change often and old yt-dlp versions stop downloading. Update it about once a week:
+
+```bash
+cd /opt/mediahunter/app && .venv/bin/pip install -U yt-dlp && systemctl restart media-hunter.service
+```
+
+or via cron: `0 5 * * 1 cd /opt/mediahunter/app && .venv/bin/pip install -qU yt-dlp && systemctl restart media-hunter.service`.
+
 ### SSRF / network isolation
 
 `validate_source_url()` is defense in depth only:
