@@ -10,10 +10,11 @@ from pathlib import Path
 from aiogram import BaseMiddleware, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
 
 from . import db
-from .config import LOGO_DIR, MAX_WATERMARK_MB
+from .config import LOGO_DIR, MAX_LOGO_GIF_MB, MAX_LOGO_GIF_SECONDS, MAX_WATERMARK_MB, WEBAPP_URL
+from . import plate as plate_mod
 from .processor import _is_valid_color, validate_logo
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,33 @@ def _convert_photo_to_png(source: Path, target: Path) -> None:
     proc = subprocess.run(["ffmpeg","-y","-i",str(source),"-frames:v","1","-vf","format=rgba",str(target)],capture_output=True,text=True,timeout=120)
     if proc.returncode != 0 or not target.exists() or target.stat().st_size <= 0: raise RuntimeError("Не удалось подготовить изображение логотипа.")
 
+def _gif_seconds(path: Path) -> float:
+    proc = subprocess.run(["ffprobe","-v","error","-show_entries","format=duration","-of","csv=p=0",str(path)],capture_output=True,text=True,timeout=30)
+    try: return float((proc.stdout or "0").strip() or 0)
+    except ValueError: return 0.0
+
+def plate_editor_keyboard(channel_id, back: str):
+    """Mini App button (when configured) + back."""
+    from .webapp import editor_url
+    rows = []
+    if WEBAPP_URL:
+        rows.append([InlineKeyboardButton(text="🎛 Настроить плашку", web_app=WebAppInfo(url=editor_url(channel_id)))])
+    rows.append([_B("◀️ Назад", back)])
+    return _kb(rows)
+
+async def _store_plate(uid, channel_id, logo: Path) -> dict:
+    """Save a freshly uploaded plate, keeping placement/timing of the old one."""
+    old = await (db.aget_channel_watermark(channel_id, uid) if channel_id else asyncio.to_thread(db.get_user_watermark, uid))
+    keep = plate_mod.normalize(old) if isinstance(old, dict) and old.get("type") == "image" and "x" in old else None
+    p = keep or {"x": 0.5, "y": 0.9, "w": 0.5, "opacity": 1.0, "timing": {"mode": "all", "start": 0, "duration": None}, "fade": True}
+    w = {"type":"image","logo":str(logo),"x":p["x"],"y":p["y"],"w":p["w"],"logo_opacity":p["opacity"],"timing":p["timing"],"fade":p["fade"]}
+    if channel_id:
+        if not any(x["channel_id"] == channel_id for x in await db.alist_channels(uid)): raise ValueError("Канал больше не подключён.")
+        await db.aset_channel_watermark(channel_id, uid, w)
+    else:
+        await db.aset_user_watermark(uid, w)
+    return w
+
 async def _download_logo_message(message: Message, bot) -> tuple[Path,str]:
     LOGO_DIR.mkdir(parents=True, exist_ok=True)
     uid = message.from_user.id if message.from_user else 0; token = uuid.uuid4().hex
@@ -100,25 +128,31 @@ async def _download_logo_message(message: Message, bot) -> tuple[Path,str]:
         kind = "document"
     elif message.animation:
         name = (message.animation.file_name or "").lower()
-        if not name.endswith(".gif"): raise ValueError("Для анимированного логотипа отправьте GIF именно как файл.")
+        if not name.endswith(".gif"): raise ValueError("Telegram превратил GIF в видео без прозрачности. Отправьте GIF как файл: 📎 → Файл.")
         file_id, ext, fmt, raw = message.animation.file_id, ".gif", "GIF", LOGO_DIR/f".upload_{uid}_{token}.gif"
         kind = "animation"
     else:
         raise ValueError("Отправьте PNG, GIF или изображение из галереи.")
     telegram_size = message.document.file_size if message.document else message.animation.file_size if message.animation else None
-    if telegram_size is not None and telegram_size > MAX_WATERMARK_MB*1024*1024: raise ValueError(f"Файл слишком большой. Максимум {MAX_WATERMARK_MB} МБ.")
+    max_mb = MAX_LOGO_GIF_MB if ext == ".gif" else MAX_WATERMARK_MB
+    if telegram_size is not None and telegram_size > max_mb*1024*1024: raise ValueError(f"Файл слишком большой. Максимум {max_mb} МБ для {'GIF' if ext == '.gif' else 'картинки'}.")
     logger.info("LOGO_RECEIVE uid=%s kind=%s format=%s",uid,kind,fmt)
     try:
         info = await asyncio.wait_for(bot.get_file(file_id), timeout=60)
         await asyncio.wait_for(bot.download_file(info.file_path, destination=raw), timeout=300)
-        if raw.stat().st_size > MAX_WATERMARK_MB*1024*1024: raise ValueError(f"Файл слишком большой. Максимум {MAX_WATERMARK_MB} МБ.")
+        if raw.stat().st_size > max_mb*1024*1024: raise ValueError(f"Файл слишком большой. Максимум {max_mb} МБ.")
         if message.photo:
             final = LOGO_DIR/f"logo_{uid}_{token}.png"
             await asyncio.to_thread(_convert_photo_to_png, raw, final); raw.unlink(missing_ok=True)
         else:
             final = LOGO_DIR/f"logo_{uid}_{token}{ext}"; raw.rename(final)
-        ok,msg = await asyncio.to_thread(validate_logo, final)
+        ok,msg = await asyncio.to_thread(validate_logo, final, max_mb)
         if not ok: final.unlink(missing_ok=True); raise ValueError(msg)
+        if final.suffix.lower() == ".gif":
+            seconds = await asyncio.to_thread(_gif_seconds, final)
+            if seconds > MAX_LOGO_GIF_SECONDS:
+                final.unlink(missing_ok=True)
+                raise ValueError(f"GIF слишком длинный: {seconds:.0f} с. Максимум {MAX_LOGO_GIF_SECONDS:.0f} с.")
         logger.info("LOGO_VALIDATED uid=%s path=%s format=%s",uid,final.name,final.suffix[1:].upper())
         return final, final.suffix[1:].upper()
     except Exception:
@@ -204,7 +238,15 @@ def register_wm_wizard(router: Router, menu_fn):
     @router.message(LogoStates.upload, F.photo | F.document | F.animation)
     async def logo_upload(m,bot,state):
         try:
-            logo,fmt=await _download_logo_message(m,bot); await state.update_data(logo_path=str(logo),logo_format=fmt); await state.set_state(LogoStates.settings); data=await state.get_data(); logger.info("LOGO_SETTINGS uid=%s format=%s",m.from_user.id if m.from_user else None,fmt); await m.answer(_logo_summary(data),reply_markup=_logo_settings_keyboard(),parse_mode="HTML")
+            logo,fmt=await _download_logo_message(m,bot)
+            if WEBAPP_URL:
+                # Mini App flow: one plate per scope, a new upload replaces the old one.
+                data=await state.get_data(); cid=data.get("channel")
+                w=await _store_plate(m.from_user.id, cid, logo); await state.clear()
+                logger.info("PLATE_UPLOADED uid=%s channel=%s format=%s",m.from_user.id,cid,fmt)
+                await m.answer(f"✅ <b>Плашка загружена</b> ({fmt})\n\nТеперь откройте редактор: перетащите её на нужное место, растяните и задайте, когда она появляется и исчезает.\n\nСейчас: {plate_mod.describe(plate_mod.normalize(w))}.",reply_markup=plate_editor_keyboard(cid,"wm" if cid is None else "channels"),parse_mode="HTML")
+                return
+            await state.update_data(logo_path=str(logo),logo_format=fmt); await state.set_state(LogoStates.settings); data=await state.get_data(); logger.info("LOGO_SETTINGS uid=%s format=%s",m.from_user.id if m.from_user else None,fmt); await m.answer(_logo_summary(data),reply_markup=_logo_settings_keyboard(),parse_mode="HTML")
         except ValueError as e: await m.answer(f"❌ {e}")
         except Exception:
             logger.exception("LOGO_UPLOAD_FAILED uid=%s",m.from_user.id if m.from_user else None); await m.answer("❌ Не удалось загрузить логотип. Попробуйте PNG или GIF ещё раз.")

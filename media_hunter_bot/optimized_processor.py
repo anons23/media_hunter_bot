@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
+from . import plate as plate_mod
 from . import processor as base
 from .config import SOFT_UNIQUE_SIZE_MB
 from .unique_filter import unique_video_filters
@@ -92,6 +93,40 @@ def _input_duration(cmd: list[str]) -> float:
 def _timeout_for(duration: float) -> int:
     """Scale the ffmpeg timeout with media length (10 min .. 3 h)."""
     return int(min(_MAX_TIMEOUT, max(_MIN_TIMEOUT, duration * 2)))
+
+
+def _probe_frame(source: Path) -> tuple[int, int, float]:
+    """Displayed (rotation-aware) width, height and duration of a video."""
+    try:
+        info, _ = base.ffprobe(Path(source))
+    except Exception:
+        return 1280, 720, 0.0
+    video = next((s for s in info.get("streams") or [] if s.get("codec_type") == "video"), {})
+    w, h = int(video.get("width") or 1280), int(video.get("height") or 720)
+    rotation = 0
+    for side in video.get("side_data_list") or []:
+        if "rotation" in side:
+            rotation = int(float(side["rotation"]))
+    rotation = int(float((video.get("tags") or {}).get("rotate", rotation)))
+    if abs(rotation) % 180 == 90:
+        w, h = h, w
+    try:
+        duration = float((info.get("format") or {}).get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    return w, h, duration
+
+
+def _final_frame_size(w: int, h: int, unique: bool, max_side: int | None) -> tuple[int, int]:
+    """Frame size after the unique scale and optional short-side cap."""
+    if unique:
+        w, h = int(w * 0.998 / 2) * 2, int(h * 0.998 / 2) * 2
+    if max_side:
+        if w >= h and h > max_side:
+            w, h = int(round(w * max_side / h / 2)) * 2, max_side
+        elif h > w and w > max_side:
+            w, h = max_side, int(round(h * max_side / w / 2)) * 2
+    return max(2, w), max(2, h)
 
 
 def _run_ffmpeg(
@@ -188,7 +223,7 @@ def _video_cmd(
     has_text = watermark.get("type") == "text" and bool(watermark.get("text"))
     cmd = ["ffmpeg", "-y", "-i", str(source)]
     if logo:
-        cmd += ["-i", str(logo)]
+        cmd += plate_mod.input_args(logo)
     cmd += [
         "-c:v", "libx264", "-threads", "2",
         "-c:a", "aac", "-b:a", _AUDIO_BITRATE, "-ar", "48000", "-ac", "2",
@@ -199,14 +234,9 @@ def _video_cmd(
     if max_side:
         base_vf = f"{base_vf},{_side_cap_filter(max_side)}"
     if logo:
-        pct = max(5, min(int(watermark.get("logo_size", 20)), 80)) / 100.0
-        opacity = max(0.05, min(float(watermark.get("logo_opacity", 0.8)), 1.0))
-        fc = (
-            f"[0:v]{base_vf}[base];"
-            f"[1:v]format=rgba,colorchannelmixer=aa={opacity:.3f}[logo0];"
-            f"[logo0][base]scale2ref=w=main_w*{pct:.4f}:h=main_h*{pct:.4f}:force_original_aspect_ratio=decrease[logo][base2];"
-            f"[base2][logo]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
-        )
+        w, h, duration = _probe_frame(source)
+        frame_w = _final_frame_size(w, h, unique=True, max_side=max_side)[0]
+        fc = plate_mod.overlay_graph(base_vf, plate_mod.normalize(watermark), frame_w, duration)
         cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a?", "-af", _UNIQUE_AUDIO_FILTER, "-shortest"]
     else:
         vf_parts = [base_vf]
@@ -242,7 +272,7 @@ def apply_watermark(
     has_text = watermark.get("type") == "text" and bool(watermark.get("text"))
     cmd = ["ffmpeg", "-y", "-i", str(source)]
     if logo:
-        cmd += ["-i", str(logo)]
+        cmd += plate_mod.input_args(logo)
     cmd += [
         "-c:v", "libx264", "-threads", "2",
         "-c:a", "aac", "-b:a", _AUDIO_BITRATE, "-ar", "48000", "-ac", "2",
@@ -250,13 +280,9 @@ def apply_watermark(
         "-crf", "30" if compress else "27", "-preset", "superfast",
     ]
     if logo:
-        pct = max(5, min(int(watermark.get("logo_size", 20)), 80)) / 100.0
-        opacity = max(0.05, min(float(watermark.get("logo_opacity", 0.8)), 1.0))
-        fc = (
-            f"[1:v]format=rgba,colorchannelmixer=aa={opacity:.3f}[logo0];"
-            f"[logo0][0:v]scale2ref=w=main_w*{pct:.4f}:h=main_h*{pct:.4f}:force_original_aspect_ratio=decrease[logo][base];"
-            f"[base][logo]overlay={base._positions_overlay(str(watermark.get('position', 'br')))}[v]"
-        )
+        w, h, duration = _probe_frame(source)
+        frame_w = _final_frame_size(w, h, unique=False, max_side=None)[0]
+        fc = plate_mod.overlay_graph("", plate_mod.normalize(watermark), frame_w, duration)
         cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a?", "-af", _UNIQUE_AUDIO_FILTER, "-shortest"]
     elif has_text:
         text_filter = base._build_text_filter(watermark, work_dir)

@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Плашка</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #0f1115);
+    --card: var(--tg-theme-secondary-bg-color, #191c22);
+    --text: var(--tg-theme-text-color, #f2f3f5);
+    --hint: var(--tg-theme-hint-color, #8b919c);
+    --accent: var(--tg-theme-button-color, #2f8cff);
+    --accent-text: var(--tg-theme-button-text-color, #fff);
+    --danger: var(--tg-theme-destructive-text-color, #ff5a5f);
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { padding: 12px 14px calc(16px + env(safe-area-inset-bottom)); user-select: none; -webkit-user-select: none; }
+  h1 { font-size: 17px; margin: 2px 0 10px; font-weight: 650; display: flex; align-items: center; justify-content: space-between; }
+  .seg { display: inline-flex; background: var(--card); border-radius: 10px; padding: 3px; gap: 2px; }
+  .seg button { border: 0; background: transparent; color: var(--hint); font: inherit; font-size: 13px;
+    padding: 6px 10px; border-radius: 8px; cursor: pointer; }
+  .seg button.on { background: var(--accent); color: var(--accent-text); }
+  .seg.full { display: flex; width: 100%; }
+  .seg.full button { flex: 1; padding: 8px 4px; }
+
+  .stage-wrap { display: flex; justify-content: center; margin-bottom: 12px; }
+  .stage { position: relative; overflow: hidden; border-radius: var(--radius); touch-action: none;
+    background:
+      radial-gradient(120% 70% at 30% 20%, #2b3a55 0%, transparent 60%),
+      radial-gradient(90% 60% at 80% 85%, #3d2a4a 0%, transparent 60%),
+      linear-gradient(160deg, #1b2130, #101318);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.06); }
+  .stage.v { height: min(56vh, 520px); aspect-ratio: 9 / 16; }
+  .stage.h { width: 100%; aspect-ratio: 16 / 9; }
+  .stage .fake { position: absolute; inset: 0; pointer-events: none; }
+  .fake .play { position: absolute; left: 50%; top: 50%; width: 54px; height: 54px; margin: -27px 0 0 -27px;
+    border-radius: 50%; background: rgba(255,255,255,.08); }
+  .fake .play::after { content: ""; position: absolute; left: 21px; top: 16px; border-left: 18px solid rgba(255,255,255,.35);
+    border-top: 11px solid transparent; border-bottom: 11px solid transparent; }
+  .fake .cap { position: absolute; left: 8%; height: 8px; border-radius: 4px; background: rgba(255,255,255,.1); }
+  .guide { position: absolute; background: rgba(47,140,255,.9); display: none; pointer-events: none; }
+  .guide.gx { top: 0; bottom: 0; width: 1px; left: 50%; }
+  .guide.gy { left: 0; right: 0; height: 1px; top: 50%; }
+  #plate { position: absolute; touch-action: none; cursor: grab; }
+  #plate img { display: block; width: 100%; height: 100%; pointer-events: none; }
+  #plate .frame { position: absolute; inset: -2px; border: 1.5px dashed rgba(255,255,255,.85); border-radius: 4px; pointer-events: none; }
+  #plate .handle { position: absolute; right: -9px; bottom: -9px; width: 24px; height: 24px; border-radius: 50%;
+    background: var(--accent); border: 2px solid #fff; touch-action: none; cursor: nwse-resize; }
+  #plate.playing .frame, #plate.playing .handle { display: none; }
+  .badge { position: absolute; right: 8px; top: 8px; opacity: .85; font-size: 12px; padding: 3px 8px; border-radius: 999px;
+    background: rgba(0,0,0,.55); color: #fff; pointer-events: none; }
+
+  .card { background: var(--card); border-radius: var(--radius); padding: 12px; margin-bottom: 10px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .row + .row { margin-top: 12px; }
+  label.t { font-size: 14px; }
+  .card .row > label.t:first-child { min-width: 124px; }
+  .val { color: var(--hint); font-size: 13px; min-width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
+  input[type=range] { flex: 1; accent-color: var(--accent); height: 28px; }
+  .sub { margin-top: 12px; }
+  .sub[hidden] { display: none; }
+  .timeline { position: relative; height: 26px; margin-top: 12px; border-radius: 8px; background: rgba(127,127,127,.18); overflow: hidden; }
+  .timeline .win { position: absolute; top: 0; bottom: 0; background: var(--accent); opacity: .75; border-radius: 6px; }
+  .timeline .head { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; display: none; }
+  .ticks { display: flex; justify-content: space-between; color: var(--hint); font-size: 11px; margin-top: 4px; }
+  .switch { position: relative; width: 46px; height: 28px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch span { position: absolute; inset: 0; border-radius: 999px; background: rgba(127,127,127,.35); transition: .2s; }
+  .switch span::after { content: ""; position: absolute; left: 3px; top: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: .2s; }
+  .switch input:checked + span { background: var(--accent); }
+  .switch input:checked + span::after { transform: translateX(18px); }
+  .switch input:disabled + span { opacity: .4; }
+  .hint { color: var(--hint); font-size: 12.5px; margin-top: 8px; }
+  .btn { width: 100%; border: 0; border-radius: 12px; padding: 12px; font: inherit; font-weight: 600; cursor: pointer; }
+  .btn.play { background: rgba(127,127,127,.18); color: var(--text); margin-top: 12px; }
+  .btn.del { background: transparent; color: var(--danger); font-weight: 500; }
+  .btn.save { background: var(--accent); color: var(--accent-text); margin-top: 4px; }
+  .empty { text-align: center; padding: 40px 10px; color: var(--hint); }
+  .empty b { display: block; color: var(--text); font-size: 17px; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<div id="app" hidden>
+  <h1>
+    <span>Плашка на видео</span>
+    <span class="seg" id="aspect">
+      <button data-a="v" class="on">9:16</button>
+      <button data-a="h">16:9</button>
+    </span>
+  </h1>
+
+  <div class="stage-wrap">
+    <div class="stage v" id="stage">
+      <div class="fake">
+        <div class="play"></div>
+        <div class="cap" style="bottom:12%;width:62%"></div>
+        <div class="cap" style="bottom:8%;width:40%"></div>
+      </div>
+      <div class="guide gx" id="gx"></div>
+      <div class="guide gy" id="gy"></div>
+      <div id="plate"><img id="img" alt=""><div class="frame"></div><div class="handle" id="handle"></div></div>
+      <div class="badge" id="badge" hidden></div>
+    </div>
+  </div>
+  <div class="hint" style="text-align:center;margin:-4px 0 10px">Перетащите плашку пальцем, размер — за синий уголок</div>
+
+  <div class="card">
+    <div class="row"><label class="t" for="size">Размер</label><input type="range" id="size" min="5" max="100" step="1"><span class="val" id="sizeV"></span></div>
+    <div class="row"><label class="t" for="op">Непрозрачность</label><input type="range" id="op" min="10" max="100" step="5"><span class="val" id="opV"></span></div>
+  </div>
+
+  <div class="card">
+    <div class="seg full" id="mode">
+      <button data-m="all">Всё видео</button>
+      <button data-m="start">В начале</button>
+      <button data-m="end">В конце</button>
+      <button data-m="custom">Своё</button>
+    </div>
+    <div class="sub" id="custom" hidden>
+      <div class="row"><label class="t" for="st">Появиться через</label><input type="range" id="st" min="0" max="30" step="0.5"><span class="val" id="stV"></span></div>
+      <div class="row"><label class="t" for="du">Показывать</label><input type="range" id="du" min="1" max="30" step="0.5"><span class="val" id="duV"></span></div>
+      <div class="row"><label class="t" for="toEnd">До конца видео</label><label class="switch"><input type="checkbox" id="toEnd"><span></span></label></div>
+    </div>
+    <div class="row sub"><label class="t" for="fade">Плавное появление и исчезновение</label><label class="switch"><input type="checkbox" id="fade"><span></span></label></div>
+    <div class="timeline" id="tl"><div class="win" id="win"></div><div class="head" id="head"></div></div>
+    <div class="ticks"><span>0 с</span><span>5 с</span><span>10 с</span><span id="tlEnd">15 с</span></div>
+    <div class="hint" id="modeHint"></div>
+    <button class="btn play" id="play">▶ Просмотр анимации</button>
+  </div>
+
+  <button class="btn save" id="saveBtn" hidden>Сохранить</button>
+  <button class="btn del" id="del">Удалить плашку</button>
+</div>
+
+<div id="msg" class="empty" hidden></div>
+
+<script>
+(() => {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  const initData = (tg && tg.initData) || "";
+  const scope = new URLSearchParams(location.search).get("scope") || "u";
+  const $ = (id) => document.getElementById(id);
+  const SAMPLE = 15; // seconds shown on the preview timeline
+  let PRESETS = { start: [1, 5], end: 5, fade: 0.5 };
+  let state = null, aspect = 1, playing = false;
+
+  function show(msgHtml) { $("app").hidden = true; $("msg").hidden = false; $("msg").innerHTML = msgHtml; }
+
+  async function api(path, opts = {}) {
+    const res = await fetch(path + (path.includes("?") ? "&" : "?") + "scope=" + encodeURIComponent(scope), {
+      ...opts,
+      headers: { "X-Telegram-Init-Data": initData, "Content-Type": "application/json", ...(opts.headers || {}) },
+    });
+    if (!res.ok) throw new Error((await res.text()) || res.statusText);
+    return res;
+  }
+
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  // ---------- layout: same math as the server (plate.py) ----------
+  function maxW() {
+    const s = $("stage");
+    return clamp((s.clientHeight * aspect) / s.clientWidth, 0.05, 1);
+  }
+  function layout() {
+    const s = $("stage"), p = $("plate");
+    const sw = s.clientWidth, sh = s.clientHeight;
+    state.w = clamp(state.w, 0.05, maxW());
+    const pw = state.w * sw, ph = pw / aspect;
+    p.style.width = pw + "px"; p.style.height = ph + "px";
+    p.style.left = state.x * (sw - pw) + "px";
+    p.style.top = state.y * (sh - ph) + "px";
+    if (!playing) $("img").style.opacity = state.opacity;
+    $("size").value = Math.round(state.w * 100); $("sizeV").textContent = Math.round(state.w * 100) + "%";
+    $("op").value = Math.round(state.opacity * 100); $("opV").textContent = Math.round(state.opacity * 100) + "%";
+  }
+
+  // ---------- timing ----------
+  function windowFor(len) {
+    const t = state.timing;
+    if (t.mode === "all") return [0, len];
+    if (t.mode === "start") return [PRESETS.start[0], Math.min(len, PRESETS.start[0] + PRESETS.start[1])];
+    if (t.mode === "end") return [Math.max(0, len - PRESETS.end), len];
+    const s = Math.min(t.start, len);
+    return [s, t.duration ? Math.min(len, s + t.duration) : len];
+  }
+  function fadeLen(a, b) { return Math.max(0.1, Math.min(PRESETS.fade, (b - a) / 3)); }
+  function alphaAt(t, len) {
+    const [a, b] = windowFor(len);
+    if (t < a || t > b) return 0;
+    if (state.timing.mode === "all" || !state.fade) return 1;
+    const f = fadeLen(a, b);
+    let k = 1;
+    if (a > 0) k = Math.min(k, (t - a) / f);
+    if (b < len) k = Math.min(k, (b - t) / f);
+    return clamp(k, 0, 1);
+  }
+  function renderTiming() {
+    const t = state.timing;
+    document.querySelectorAll("#mode button").forEach((b) => b.classList.toggle("on", b.dataset.m === t.mode));
+    $("custom").hidden = t.mode !== "custom";
+    $("st").value = t.start; $("stV").textContent = t.start + " с";
+    $("toEnd").checked = !t.duration; $("du").disabled = !t.duration;
+    $("du").value = t.duration || 5; $("duV").textContent = t.duration ? t.duration + " с" : "—";
+    $("fade").checked = state.fade; $("fade").disabled = t.mode === "all";
+    const [a, b] = windowFor(SAMPLE);
+    $("win").style.left = (a / SAMPLE) * 100 + "%";
+    $("win").style.width = Math.max(1, ((b - a) / SAMPLE) * 100) + "%";
+    const hints = {
+      all: "Плашка видна на протяжении всего видео.",
+      start: `Появится на ${PRESETS.start[0]}-й секунде и будет видна ${PRESETS.start[1]} с.`,
+      end: `Видна последние ${PRESETS.end} с каждого видео — удобно для призыва подписаться.`,
+      custom: t.duration
+        ? `Появится через ${t.start} с и будет видна ${t.duration} с. Если видео короче — бот сам сдвинет плашку и предупредит.`
+        : `Появится через ${t.start} с и останется до конца видео.`,
+    };
+    $("modeHint").textContent = hints[t.mode] + " Шкала — пример на 15 секунд.";
+    const badge = $("badge");
+    badge.hidden = t.mode === "all";
+    badge.textContent = t.mode === "all" ? "" : `видна ${a.toFixed(a % 1 ? 1 : 0)}–${b.toFixed(b % 1 ? 1 : 0)} с из ${SAMPLE}`;
+  }
+
+  // ---------- drag & resize ----------
+  function setupDrag() {
+    const s = $("stage"), p = $("plate"), h = $("handle");
+    let mode = null, sx = 0, sy = 0, sl = 0, st = 0, spw = 0;
+    const SNAP = 0.03;
+    p.addEventListener("pointerdown", (e) => {
+      if (playing) return;
+      mode = e.target === h ? "resize" : "move";
+      p.setPointerCapture(e.pointerId);
+      sx = e.clientX; sy = e.clientY; sl = p.offsetLeft; st = p.offsetTop; spw = p.offsetWidth;
+      p.style.cursor = "grabbing";
+      e.preventDefault();
+    });
+    p.addEventListener("pointermove", (e) => {
+      if (!mode) return;
+      const sw = s.clientWidth, sh = s.clientHeight;
+      const dx = e.clientX - sx, dy = e.clientY - sy;
+      if (mode === "move") {
+        const pw = p.offsetWidth, ph = p.offsetHeight;
+        const fx = sw - pw, fy = sh - ph;
+        let x = fx > 0 ? clamp((sl + dx) / fx, 0, 1) : 0.5;
+        let y = fy > 0 ? clamp((st + dy) / fy, 0, 1) : 0.5;
+        const snapX = Math.abs(x - 0.5) < SNAP, snapY = Math.abs(y - 0.5) < SNAP;
+        if (snapX) x = 0.5; if (snapY) y = 0.5;
+        $("gx").style.display = snapX ? "block" : "none";
+        $("gy").style.display = snapY ? "block" : "none";
+        state.x = +x.toFixed(4); state.y = +y.toFixed(4);
+      } else {
+        const grow = Math.abs(dx) > Math.abs(dy * aspect) ? dx : dy * aspect;
+        state.w = +clamp((spw + grow) / sw, 0.05, maxW()).toFixed(4);
+      }
+      layout();
+    });
+    const end = () => {
+      if (!mode) return;
+      mode = null; p.style.cursor = "grab";
+      $("gx").style.display = "none"; $("gy").style.display = "none";
+      tg && tg.HapticFeedback && tg.HapticFeedback.selectionChanged();
+    };
+    p.addEventListener("pointerup", end);
+    p.addEventListener("pointercancel", end);
+  }
+
+  // ---------- preview ----------
+  function play() {
+    if (playing) return;
+    playing = true;
+    $("plate").classList.add("playing");
+    $("head").style.display = "block";
+    $("play").textContent = "■ Остановить";
+    const t0 = performance.now();
+    const step = (now) => {
+      if (!playing) return;
+      const t = (now - t0) / 1000;
+      if (t >= SAMPLE) return stop();
+      $("head").style.left = (t / SAMPLE) * 100 + "%";
+      $("img").style.opacity = state.opacity * alphaAt(t, SAMPLE);
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+  function stop() {
+    playing = false;
+    $("plate").classList.remove("playing");
+    $("head").style.display = "none";
+    $("play").textContent = "▶ Просмотр анимации";
+    layout();
+  }
+
+  // ---------- save / delete ----------
+  async function save() {
+    stop();
+    const mb = tg && tg.MainButton;
+    try {
+      mb && mb.showProgress();
+      await api("api/plate", { method: "POST", body: JSON.stringify({ plate: state }) });
+      tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+      if (tg) tg.close(); else alert("Сохранено");
+    } catch (err) {
+      mb && mb.hideProgress();
+      tg ? tg.showAlert("Не удалось сохранить: " + err.message) : alert(err.message);
+    }
+  }
+  function confirmDelete() {
+    const go = async () => {
+      try {
+        await api("api/plate/delete", { method: "POST", body: "{}" });
+        tg ? tg.close() : show("<b>Плашка удалена</b>");
+      } catch (err) { tg ? tg.showAlert(err.message) : alert(err.message); }
+    };
+    tg ? tg.showConfirm("Удалить плашку? Видео будут без неё.", (ok) => ok && go()) : confirm("Удалить плашку?") && go();
+  }
+
+  // ---------- bindings ----------
+  function bind() {
+    document.querySelectorAll("#aspect button").forEach((b) => b.addEventListener("click", () => {
+      document.querySelectorAll("#aspect button").forEach((x) => x.classList.toggle("on", x === b));
+      $("stage").className = "stage " + b.dataset.a;
+      requestAnimationFrame(layout);
+    }));
+    document.querySelectorAll("#mode button").forEach((b) => b.addEventListener("click", () => {
+      state.timing.mode = b.dataset.m;
+      if (b.dataset.m !== "all" && state.fade === undefined) state.fade = true;
+      renderTiming();
+    }));
+    $("size").addEventListener("input", (e) => { state.w = e.target.value / 100; layout(); });
+    $("op").addEventListener("input", (e) => { state.opacity = e.target.value / 100; layout(); });
+    $("st").addEventListener("input", (e) => { state.timing.start = +e.target.value; renderTiming(); });
+    $("du").addEventListener("input", (e) => { state.timing.duration = +e.target.value; renderTiming(); });
+    $("toEnd").addEventListener("change", (e) => { state.timing.duration = e.target.checked ? null : +$("du").value || 5; renderTiming(); });
+    $("fade").addEventListener("change", (e) => { state.fade = e.target.checked; renderTiming(); });
+    $("play").addEventListener("click", () => (playing ? stop() : play()));
+    $("del").addEventListener("click", confirmDelete);
+    window.addEventListener("resize", () => layout());
+    setupDrag();
+    if (tg) {
+      tg.MainButton.setText("Сохранить плашку");
+      tg.MainButton.onClick(save);
+      tg.MainButton.show();
+    } else {
+      $("saveBtn").hidden = false;
+      $("saveBtn").addEventListener("click", save);
+    }
+  }
+
+  async function boot() {
+    if (tg) { tg.ready(); tg.expand(); }
+    if (!initData) return show("<b>Откройте редактор из бота</b>Кнопка «🎛 Настроить плашку» в разделе логотипа.");
+    try {
+      const data = await (await api("api/plate")).json();
+      if (!data.has_logo) return show("<b>Плашка ещё не загружена</b>Отправьте в бот картинку (PNG/JPG) или GIF-файл, затем откройте редактор снова.");
+      if (data.presets) PRESETS = data.presets;
+      state = data.plate;
+      const blob = await (await api("api/plate/image")).blob();
+      const img = $("img");
+      img.onload = () => {
+        aspect = img.naturalWidth / img.naturalHeight || 1;
+        $("app").hidden = false;
+        bind(); renderTiming(); requestAnimationFrame(layout);
+      };
+      img.src = URL.createObjectURL(blob);
+    } catch (err) {
+      show("<b>Не удалось открыть редактор</b>" + String(err.message || err).replace(/[<>&]/g, ""));
+    }
+  }
+  boot();
+})();
+</script>
+</body>
+</html>

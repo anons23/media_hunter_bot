@@ -460,15 +460,16 @@ def process_media(source: Path, work_dir: Path, watermark: dict[str, Any], audio
     return output
 
 
-def validate_logo(path: Path) -> tuple[bool, str]:
+def validate_logo(path: Path, max_mb: int | None = None) -> tuple[bool, str]:
     """Validate logo file; messages are safe to show to Telegram users."""
+    max_mb = max_mb or MAX_WATERMARK_MB
     try:
         size = path.stat().st_size
     except OSError as e:
         logger.warning("validate_logo cannot stat %s: %s", path, e)
         return False, "Не удалось прочитать файл логотипа."
-    if size > MAX_WATERMARK_MB * 1024 * 1024:
-        return False, f"Логотип слишком большой (макс. {MAX_WATERMARK_MB} МБ)."
+    if size > max_mb * 1024 * 1024:
+        return False, f"Логотип слишком большой (макс. {max_mb} МБ)."
     proc = _run(
         [
             "ffprobe",

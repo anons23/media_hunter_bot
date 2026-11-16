@@ -23,6 +23,17 @@ except ValueError:
 
 LOCAL_BOT_API = os.getenv("LOCAL_BOT_API", "").strip()
 
+# Telegram Mini App (plate editor). Public HTTPS base URL, e.g.
+# https://app.example.com — empty disables the Mini App (button settings
+# are used instead). The bot serves it on WEBAPP_HOST:WEBAPP_PORT behind
+# an HTTPS reverse proxy (nginx).
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip().rstrip("/")
+WEBAPP_HOST = os.getenv("WEBAPP_HOST", "127.0.0.1").strip() or "127.0.0.1"
+WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8090"))
+# Plate (logo) upload limits.
+MAX_LOGO_GIF_MB = int(os.getenv("MAX_LOGO_GIF_MB", "10"))
+MAX_LOGO_GIF_SECONDS = float(os.getenv("MAX_LOGO_GIF_SECONDS", "15"))
+
 # Media policy:
 #   <= SOFT_UNIQUE_SIZE_MB: unique without forced compression.
 #   SOFT_UNIQUE_SIZE_MB..MAX_UNIQUE_SIZE_MB: unique with compression to the

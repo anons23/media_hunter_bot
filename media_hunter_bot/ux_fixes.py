@@ -37,7 +37,10 @@ def _channel_id_from_state(data: dict) -> int | None:
 
 async def _get_watermark(uid: int, channel_id: int | None):
     if channel_id is None:
-        return await db.aget_user_watermark(uid)
+        # The user's own watermark (the async getter is overridden in
+        # __init__ to return the first channel's one).
+        import asyncio
+        return await asyncio.to_thread(db.get_user_watermark, uid)
     return await db.aget_channel_watermark(channel_id, uid)
 
 
@@ -135,17 +138,25 @@ async def _show_logo_config(c: CallbackQuery, state: FSMContext):
         # Remember the scope for the replace/delete buttons.
         await state.update_data(channel=cid)
         scope = "для этого канала" if cid is not None else "для ваших видео"
+        from . import plate as plate_mod
+        from .config import WEBAPP_URL
+        rows = []
+        if WEBAPP_URL:
+            from aiogram.types import WebAppInfo
+            from .webapp import editor_url
+            rows.append([InlineKeyboardButton(text="🎛 Настроить плашку", web_app=WebAppInfo(url=editor_url(cid)))])
+        rows += [
+            [_b("🔄 Загрузить новую", "wmlogo_edit")],
+            [_b("🗑 Удалить плашку", "wmlogo_delete")],
+            [_b("◀️ Назад", "wm" if cid is None else "channels")],
+        ]
         await c.answer()
         await _edit_or_answer(
             c,
-            "🖼 <b>Логотип уже настроен</b>\n\n"
-            f"Сейчас логотип сохранён {scope}. Он будет добавляться к видео автоматически.\n\n"
-            "Можно заменить логотип или удалить его. После удаления видео будут без логотипа.",
-            _kb([
-                [_b("🔄 Заменить логотип", "wmlogo_edit")],
-                [_b("🗑 Удалить логотип", "wmlogo_delete")],
-                [_b("◀️ Назад", "wm" if cid is None else "channels")],
-            ]),
+            "🖼 <b>Плашка уже загружена</b>\n\n"
+            f"Сейчас она сохранена {scope}: {html.escape(plate_mod.describe(plate_mod.normalize(watermark)))}.\n\n"
+            "Место, размер и время показа меняются в редакторе. Новая загрузка заменит текущую плашку.",
+            _kb(rows),
         )
         return
 
@@ -155,7 +166,7 @@ async def _show_logo_config(c: CallbackQuery, state: FSMContext):
     await c.answer()
     await _edit_or_answer(
         c,
-        "🖼 <b>Логотип</b>\n\nСейчас логотип не настроен. Отправьте PNG, GIF или фото из галереи, чтобы добавить его к видео.",
+        "🖼 <b>Плашка</b>\n\nСейчас плашка не загружена. Отправьте картинку (PNG/JPG, до 5 МБ) или GIF-файл (до 10 МБ, до 15 с), чтобы добавить её на видео.\n\nGIF отправляйте как файл (📎 → Файл), иначе Telegram уберёт прозрачность.",
         _kb([[_b("◀️ Назад", "wm" if cid is None else "channels")]]),
     )
 
@@ -192,10 +203,10 @@ async def _delete_logo(c: CallbackQuery, state: FSMContext):
     if watermark.get("type") == "image":
         await _set_watermark(c.from_user.id, cid, {})
     await state.clear()
-    await c.answer("Логотип удалён")
+    await c.answer("Плашка удалена")
     await _edit_or_answer(
         c,
-        "🗑 <b>Готово</b>\n\nЛоготип удалён. Теперь видео можно обрабатывать без него.",
+        "🗑 <b>Готово</b>\n\nПлашка удалена. Теперь видео будут без неё.",
         _kb([[_b("💧 Водяной знак", "wm" if cid is None else f"cwmx:{cid}")], [_b("◀️ Назад", "back" if cid is None else "channels")]]),
     )
 

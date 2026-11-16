@@ -30,16 +30,22 @@ class TestOptimizedLogo(unittest.TestCase):
             }
 
             with patch.object(optimized_processor.base, "_logo_path", return_value=logo), \
+                 patch.object(optimized_processor, "_probe_frame", return_value=(1000, 500, 10.0)), \
                  patch.object(optimized_processor, "_run_ffmpeg", side_effect=fake_run_ffmpeg):
                 result = optimized_processor.apply_watermark(
                     source, work, watermark, False, lambda _proc=None: None
                 )
 
             self.assertTrue(result.name.startswith("watermark_"))
-            graph = captured["cmd"][captured["cmd"].index("-filter_complex") + 1]
+            cmd = captured["cmd"]
+            graph = cmd[cmd.index("-filter_complex") + 1]
+            # Legacy logo: 40% of the video width, top-right, 60% opacity.
             self.assertIn("colorchannelmixer=aa=0.600", graph)
-            self.assertIn("scale2ref=w=main_w*0.4000:h=main_h*0.4000", graph)
-            self.assertIn("overlay=x=W-w-10:y=10", graph)
+            self.assertIn("scale=400:-2", graph)
+            self.assertIn("overlay=x='(W-w)*1.0000':y='(H-h)*0.0000'", graph)
+            self.assertNotIn("scale2ref", graph)
+            # Still image is looped so timing/fade work on every frame.
+            self.assertIn("-loop", cmd)
 
 
 if __name__ == "__main__":

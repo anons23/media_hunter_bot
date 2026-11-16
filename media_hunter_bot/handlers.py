@@ -84,6 +84,22 @@ from .processor import (
 from .oversize_processor import compress_for_send
 
 
+def plate_user_note(watermark, source_info, size: int, audio_only: bool) -> str | None:
+    """One-line reminder for the user about how the plate was applied."""
+    if audio_only or not isinstance(watermark, dict) or not watermark.get("type"):
+        return None
+    if size > MAX_UNIQUE_SIZE_MB * 1024 * 1024:
+        return f"ℹ️ Видео больше {MAX_UNIQUE_SIZE_MB} МБ — отправлено без плашки и водяного знака."
+    if watermark.get("type") != "image":
+        return None
+    try:
+        duration = float((source_info.get("format") or {}).get("duration") or 0)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    _, _, note = plate_mod.window(plate_mod.normalize(watermark), duration or None)
+    return f"ℹ️ {note}" if note else None
+
+
 def upload_timeout(path: Path) -> int:
     """aiogram request timeout for sending a file.
 
@@ -96,6 +112,8 @@ def upload_timeout(path: Path) -> int:
         size_mb = 0
     return int(min(3600, max(120, 60 + size_mb * 2)))
 from .progress import ProgressTracker
+from . import plate as plate_mod
+from . import webapp
 from .opp_logic import opp_check
 from .opp_admin import register_opp_admin
 from .admin_premium import register_admin_premium
@@ -456,7 +474,7 @@ class Engine:
                 await progress.cancel()
                 return
             await progress.advance("analyze")
-            _, size = await asyncio.to_thread(ffprobe, source)
+            source_info, size = await asyncio.to_thread(ffprobe, source)
             hard_limit = MAX_SOURCE_DOWNLOAD_MB * 1024 * 1024
             if size > hard_limit:
                 raise RuntimeError(f"Исходный файл превышает абсолютный лимит {MAX_SOURCE_DOWNLOAD_MB} МБ")
@@ -538,6 +556,12 @@ class Engine:
             await progress.advance("send")
             await self._send_private(j.uid, result, caption, filename=safe_media_filename(media_title, result.suffix or ".mp4"))
             await progress.complete()
+            note = plate_user_note(watermark, source_info, size, audio_only)
+            if note:
+                try:
+                    await self.bot.send_message(j.uid, note)
+                except Exception:
+                    pass
             for ch in await db.alist_channels(j.uid):
                 if not ch["enabled"]:
                     continue
@@ -1037,7 +1061,7 @@ async def dele(c: CallbackQuery, state: FSMContext):
 async def wm(c: CallbackQuery, state: FSMContext):
     await state.clear()
     await c.answer()
-    await c.message.edit_text("💧 Водяной знак пользователя:", reply_markup=kb([[B("📝 Текст", "wmtext")], [B("🖼 PNG", "wmlogo")], [B("◀️ Назад", "back")]]))
+    await c.message.edit_text("💧 Водяной знак пользователя:", reply_markup=kb([[B("📝 Текст", "wmtext")], [B("🖼 Плашка", "wmlogo")], [B("◀️ Назад", "back")]]))
 
 
 @router.callback_query(F.data.startswith("cwmx:"))
@@ -1053,7 +1077,7 @@ async def cwm(c: CallbackQuery, state: FSMContext):
         return
     await state.update_data(cid=cid)
     await c.answer()
-    await c.message.edit_text("💧 Watermark этого канала:", reply_markup=kb([[B("📝 Текст", "cwmtext")], [B("🖼 PNG", "cwmlogo")], [B("◀️ Назад", "channels")]]))
+    await c.message.edit_text("💧 Watermark этого канала:", reply_markup=kb([[B("📝 Текст", "cwmtext")], [B("🖼 Плашка", "cwmlogo")], [B("◀️ Назад", "channels")]]))
 
 
 @router.callback_query(F.data == "admin")
@@ -1305,12 +1329,15 @@ async def main():
         except ValueError:
             pass
     await engine.start()
+    web_runner = await webapp.start(bot)
     try:
         await dp.start_polling(bot)
     except asyncio.CancelledError:
         pass
     finally:
         await engine.shutdown()
+        if web_runner is not None:
+            await web_runner.cleanup()
         if session is not None:
             await session.close()
         else:
