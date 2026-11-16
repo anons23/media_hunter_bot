@@ -68,8 +68,8 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertEqual(config.SOFT_UNIQUE_SIZE_MB, 80)
         self.assertEqual(config.MAX_UNIQUE_SIZE_MB, 100)
         self.assertEqual(config.MAX_URL_LOGICAL_MB, 100)
-        self.assertEqual(config.MAX_SOURCE_DOWNLOAD_MB, 1024)
-        self.assertEqual(config.MAX_USER_UPLOAD_MB, 1024)
+        self.assertEqual(config.MAX_SOURCE_DOWNLOAD_MB, 700)  # small VPS: 10 GB disk
+        self.assertEqual(config.MAX_USER_UPLOAD_MB, 700)
         self.assertGreater(config.MAX_SOURCE_DOWNLOAD_MB, config.MAX_UNIQUE_SIZE_MB)
 
     def test_logo_path_is_confined_to_logo_dir(self):
