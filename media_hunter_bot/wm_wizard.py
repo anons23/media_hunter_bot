@@ -89,6 +89,30 @@ def _convert_photo_to_png(source: Path, target: Path) -> None:
     proc = subprocess.run(["ffmpeg","-y","-i",str(source),"-frames:v","1","-vf","format=rgba",str(target)],capture_output=True,text=True,timeout=120)
     if proc.returncode != 0 or not target.exists() or target.stat().st_size <= 0: raise RuntimeError("Не удалось подготовить изображение логотипа.")
 
+def _video_to_gif(source: Path, target: Path, max_mb: int) -> None:
+    """Short MP4 animation -> looping GIF with its own palette.
+
+    Tries a 480 px / 15 fps version first, then 320 px / 10 fps if the GIF
+    would exceed max_mb. Small inputs (logo animations) take well under a
+    second on one CPU core.
+    """
+    from .mediarun import low_priority
+    for width, fps in ((480, 15), (320, 10)):
+        vf = (
+            f"fps={fps},scale='min({width},iw)':-2:flags=lanczos,"
+            "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5"
+        )
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(source), "-t", str(MAX_LOGO_GIF_SECONDS),
+               "-an", "-vf", vf, "-loop", "0", str(target)]
+        proc = subprocess.run(low_priority(cmd), capture_output=True, text=True, timeout=120)
+        if proc.returncode != 0 or not target.exists() or target.stat().st_size <= 0:
+            logger.warning("LOGO_MP4_TO_GIF failed: %s", (proc.stderr or "")[:300])
+            raise ValueError("Не удалось превратить анимацию в GIF. Пришлите GIF или PNG.")
+        if target.stat().st_size <= max_mb * 1024 * 1024:
+            return
+    raise ValueError(f"После перевода в GIF файл больше {max_mb} МБ. Пришлите анимацию покороче или поменьше.")
+
+
 def _gif_seconds(path: Path) -> float:
     proc = subprocess.run(["ffprobe","-v","error","-show_entries","format=duration","-of","csv=p=0",str(path)],capture_output=True,text=True,timeout=30)
     try: return float((proc.stdout or "0").strip() or 0)
@@ -168,7 +192,8 @@ def _document_logo_ext(doc, uid) -> str:
     if suffix == ".gif" or mime == "image/gif":
         return ".gif"
     if suffix in _VIDEO_EXTS or mime.startswith("video"):
-        raise ValueError("Это видео, а не GIF. Нужен файл .gif или .png — анимацию в формате MP4 бот как логотип не принимает.")
+        # Telegram re-encodes GIFs to MP4 even when sent as a file; convert back.
+        return ".mp4"
     if not suffix and not mime:
         # Unknown: let the signature check after download decide.
         return ".gif"
@@ -188,14 +213,17 @@ async def _download_logo_message(message: Message, bot) -> tuple[Path,str]:
         kind = "document"
     elif message.animation:
         name = (message.animation.file_name or "").lower()
-        if not name.endswith(".gif"): raise ValueError("Telegram превратил GIF в видео без прозрачности. Отправьте GIF как файл: 📎 → Файл.")
-        file_id, ext, fmt, raw = message.animation.file_id, ".gif", "GIF", LOGO_DIR/f".upload_{uid}_{token}.gif"
+        # Telegram usually turns GIFs into MP4 animations: convert those back.
+        ext = ".gif" if name.endswith(".gif") else ".mp4"
+        file_id, fmt, raw = message.animation.file_id, ext[1:].upper(), LOGO_DIR/f".upload_{uid}_{token}{ext}"
         kind = "animation"
     else:
         raise ValueError("Отправьте PNG, GIF или изображение из галереи.")
     telegram_size = message.document.file_size if message.document else message.animation.file_size if message.animation else None
-    max_mb = MAX_LOGO_GIF_MB if ext == ".gif" else MAX_WATERMARK_MB
-    if telegram_size is not None and telegram_size > max_mb*1024*1024: raise ValueError(f"Файл слишком большой. Максимум {max_mb} МБ для {'GIF' if ext == '.gif' else 'картинки'}.")
+    animated = ext in (".gif", ".mp4")
+    max_mb = MAX_LOGO_GIF_MB if animated else MAX_WATERMARK_MB
+    converted = False
+    if telegram_size is not None and telegram_size > max_mb*1024*1024: raise ValueError(f"Файл слишком большой. Максимум {max_mb} МБ для {'GIF' if animated else 'картинки'}.")
     logger.info("LOGO_RECEIVE uid=%s kind=%s format=%s",uid,kind,fmt)
     try:
         info = await asyncio.wait_for(bot.get_file(file_id), timeout=60)
@@ -208,6 +236,19 @@ async def _download_logo_message(message: Message, bot) -> tuple[Path,str]:
             # Trust the bytes, not the file name: a GIF named "logo" or a
             # PNG named ".gif" must still work; an MP4 named ".gif" must not.
             real = _sniff_image(raw)
+            if real is None and ext == ".mp4":
+                # MP4 animation (a GIF re-encoded by Telegram) -> GIF.
+                seconds = await asyncio.to_thread(_gif_seconds, raw)
+                if seconds > MAX_LOGO_GIF_SECONDS:
+                    raise ValueError(f"Анимация слишком длинная: {seconds:.0f} с. Максимум {MAX_LOGO_GIF_SECONDS:.0f} с.")
+                gif = LOGO_DIR/f".upload_{uid}_{token}.gif"
+                try:
+                    await asyncio.to_thread(_video_to_gif, raw, gif, MAX_LOGO_GIF_MB)
+                except Exception:
+                    gif.unlink(missing_ok=True); raise
+                raw.unlink(missing_ok=True); raw = gif
+                real = ".gif"; converted = True
+                logger.info("LOGO_MP4_TO_GIF uid=%s seconds=%.1f size=%s", uid, seconds, gif.stat().st_size)
             if real is None:
                 raise ValueError("Файл не похож на PNG или GIF. Пришлите настоящий PNG или GIF.")
             ext = real
@@ -222,7 +263,8 @@ async def _download_logo_message(message: Message, bot) -> tuple[Path,str]:
                 final.unlink(missing_ok=True)
                 raise ValueError(f"GIF слишком длинный: {seconds:.0f} с. Максимум {MAX_LOGO_GIF_SECONDS:.0f} с.")
         logger.info("LOGO_VALIDATED uid=%s path=%s format=%s",uid,final.name,final.suffix[1:].upper())
-        return final, final.suffix[1:].upper()
+        # MP4 has no alpha channel, so a converted GIF has a solid background.
+        return final, ("GIF из видео, без прозрачного фона" if converted else final.suffix[1:].upper())
     except Exception:
         raw.unlink(missing_ok=True); raise
 
