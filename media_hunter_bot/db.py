@@ -88,6 +88,8 @@ def init_db() -> None:
         if "chat_ref" not in cols:
             c.execute("ALTER TABLE opp ADD COLUMN chat_ref TEXT NOT NULL DEFAULT ''")
         for slot in (1, 2, 3): c.execute("INSERT OR IGNORE INTO opp(slot) VALUES(?)", (slot,))
+        from .admin_stats import ensure_schema
+        ensure_schema(c)
         if ADMIN_ID:
             _ensure_user_locked(c, ADMIN_ID, None, None)
             c.execute("UPDATE users SET permanent_premium=1 WHERE user_id=?", (ADMIN_ID,))

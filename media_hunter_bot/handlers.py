@@ -156,6 +156,7 @@ from . import mediarun
 from .opp_logic import opp_check
 from .opp_admin import register_opp_admin
 from .admin_premium import register_admin_premium
+from . import admin_stats
 from .wm_wizard import register_wm_wizard
 from .user_errors import user_facing_error
 router = Router()
@@ -248,6 +249,7 @@ def menu(uid: int) -> InlineKeyboardMarkup:
 register_opp_admin(router, menu)
 register_wm_wizard(router, menu)
 register_admin_premium(router)
+admin_stats.register_admin_stats(router)
 
 
 def premium_menu() -> InlineKeyboardMarkup:
@@ -475,6 +477,10 @@ class Engine:
         self.active_work_dirs.add(str(work))
         register = lambda p=None: self.register(j.uid, p, j.generation)
         progress = ProgressTracker(self.bot, j.uid, has_url=bool(j.url))
+        job_started = asyncio.get_running_loop().time()
+        job_status: str | None = None
+        job_error: str | None = None
+        job_size_mb: float | None = None
         try:
             user = await db.aget_user(j.uid)
             if not user:
@@ -531,6 +537,7 @@ class Engine:
                 return
             await progress.advance("analyze")
             source_info, size = await asyncio.to_thread(ffprobe, source)
+            job_size_mb = round(size / (1024 * 1024), 1)
             try:
                 src_duration = float(((source_info or {}).get("format") or {}).get("duration") or 0) if isinstance(source_info, dict) else 0.0
             except (TypeError, ValueError):
@@ -627,6 +634,7 @@ class Engine:
             await progress.advance("send")
             await self._send_private(j.uid, result, caption, filename=safe_media_filename(media_title, result.suffix or ".mp4"))
             await progress.complete()
+            job_status = "ok"
             note = plate_user_note(watermark, source_info, size, audio_only)
             if note:
                 try:
@@ -676,14 +684,21 @@ class Engine:
                     except Exception:
                         pass
         except asyncio.CancelledError:
+            job_status = "cancelled"
             try:
                 await progress.cancel()
             except Exception:
                 pass
             raise
         except Exception as e:
-            logger.exception("Job failed for uid=%s", j.uid)
             safe = user_facing_error(e)
+            job_status, job_error = "failed", f"{safe} [{type(e).__name__}: {str(e)[:120]}]"
+            if isinstance(e, (RuntimeError, ValueError)) and str(e).strip() == safe:
+                # Expected, user-facing outcome (limits, private video, …):
+                # keep it out of the admin error log, it is in the jobs list.
+                logger.warning("Job failed for uid=%s: %s", j.uid, safe)
+            else:
+                logger.exception("Job failed for uid=%s", j.uid)
             try:
                 await progress.fail()
             except Exception:
@@ -693,6 +708,11 @@ class Engine:
             except Exception:
                 pass
         finally:
+            if job_status:
+                await admin_stats.record_job(
+                    j.uid, "url" if j.url else "upload", job_status, job_size_mb,
+                    asyncio.get_running_loop().time() - job_started, job_error,
+                )
             self.active_work_dirs.discard(str(work))
             if j.source:
                 upload_root = j.source.parent
@@ -723,6 +743,7 @@ class Engine:
                 # Low disk: also drop leftovers older than 1 h, not only 12 h.
                 low = mediarun.free_disk_mb(MEDIA_DIR) < MIN_FREE_DISK_MB * 2
                 await asyncio.to_thread(cleanup_media, 1 if low else CLEANER_AGE_HOURS, self.active_paths())
+                await asyncio.to_thread(admin_stats.prune_sync)
                 if LOCAL_BOT_API_DIR:
                     removed = await asyncio.to_thread(mediarun.cleanup_bot_api_dir, LOCAL_BOT_API_DIR, LOCAL_BOT_API_FILE_TTL_MIN)
                     if removed:
@@ -1167,7 +1188,7 @@ async def admin(c: CallbackQuery, state: FSMContext):
         await c.answer("Нет доступа", show_alert=True)
         return
     await c.answer()
-    await c.message.edit_text("👑 Админ-панель", reply_markup=kb([[B("🎁 Управление Premium", "admin_premium")], [B("🔐 ОПП", "aopp")], [B("📊 Отчёты ОПП", "aopp_reports")], [B("⏱ Срок хранения ОПП", "aopp_retain")], [B("📣 Реклама", "aad")], [B("💎 Ссылка Stars", "astars")], [B("🔄 Обновить yt-dlp", "aytdlp")], [B("🔄 Перезапустить бота", "abot")], [B("◀️ Назад", "back")]]))
+    await c.message.edit_text("👑 Админ-панель", reply_markup=kb([[B("📊 Статистика", "astats"), B("🩺 Сервер", "ahealth"), B("🧯 Ошибки", "aerrors")], [B("🎁 Управление Premium", "admin_premium")], [B("🔐 ОПП", "aopp")], [B("📊 Отчёты ОПП", "aopp_reports")], [B("⏱ Срок хранения ОПП", "aopp_retain")], [B("📣 Реклама", "aad")], [B("💎 Ссылка Stars", "astars")], [B("🔄 Обновить yt-dlp", "aytdlp")], [B("🔄 Перезапустить бота", "abot")], [B("◀️ Назад", "back")]]))
 
 @router.callback_query(F.data == "aopp")
 async def aopp(c: CallbackQuery):
@@ -1388,6 +1409,7 @@ async def paysupport(m: Message, state: FSMContext):
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     db.init_db()
+    admin_stats.install_error_handler()
     if LOCAL_BOT_API:
         session = AiohttpSession(api=TelegramAPIServer.from_base(LOCAL_BOT_API))
         bot = Bot(BOT_TOKEN, session=session)
