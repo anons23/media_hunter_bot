@@ -27,7 +27,10 @@ python main.py
 With the default configuration:
 - up to **80 MB**: process/unique without forced compression;
 - **80–100 MB**: process, then use a compressed fallback if necessary;
-- over **100 MB** and up to the source safety limit: send the original without unique processing;
+- over **100 MB**: never unique-processed:
+  - **100–130 MB** (`ORIGINAL_SEND_MAX_MB`): the original is sent as is (non-MP4 is only remuxed to MP4, no re-encode);
+  - **over 130 MB**: gentle quality-first compression — H.264 `-crf 22 -preset veryfast` (`OVERSIZE_CRF`, `OVERSIZE_PRESET`), resolution kept, only sources above 1080p (short side, `OVERSIZE_MAX_SIDE`) are downscaled to 1080p, AAC/MP3 audio copied untouched (other codecs → AAC 192k). If re-encoding does not shrink the file, the original is sent. Timeout scales with duration (30 min … 6 h);
+  - results are sent through the local Bot API up to `TELEGRAM_MAX_UPLOAD_MB` (2000 MB); send request timeout scales with file size;
 - source/user uploads are capped at **1024 MB (1 GB)** by default.
 
 The 100 MB value is the logical unique-processing threshold, not the Telegram transport limit. A local Telegram Bot API can accept larger files according to its configured capabilities.

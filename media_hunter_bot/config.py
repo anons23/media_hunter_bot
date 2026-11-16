@@ -27,11 +27,22 @@ LOCAL_BOT_API = os.getenv("LOCAL_BOT_API", "").strip()
 #   <= SOFT_UNIQUE_SIZE_MB: unique without forced compression.
 #   SOFT_UNIQUE_SIZE_MB..MAX_UNIQUE_SIZE_MB: unique with compression to the
 #       soft target (80 MB by default).
-#   > MAX_UNIQUE_SIZE_MB: send original, without unique processing.
+#   > MAX_UNIQUE_SIZE_MB: never unique-processed:
+#       MAX_UNIQUE_SIZE_MB..ORIGINAL_SEND_MAX_MB: send the original as is;
+#       > ORIGINAL_SEND_MAX_MB: gentle quality-preserving compression (CRF).
 # MAX_SOURCE_DOWNLOAD_MB is the absolute source-size safety limit.
 SOFT_UNIQUE_SIZE_MB = int(os.getenv("SOFT_UNIQUE_SIZE_MB", "80"))
 MAX_UNIQUE_SIZE_MB = int(os.getenv("MAX_UNIQUE_SIZE_MB", "100"))
+# Send ceiling for results of the <= MAX_UNIQUE_SIZE_MB unique pipeline.
 MAX_SEND_MB = int(os.getenv("MAX_SEND_MB", str(MAX_UNIQUE_SIZE_MB)))
+ORIGINAL_SEND_MAX_MB = int(os.getenv("ORIGINAL_SEND_MAX_MB", "130"))
+# Hard upload ceiling of the local Telegram Bot API server (oversize results).
+TELEGRAM_MAX_UPLOAD_MB = int(os.getenv("TELEGRAM_MAX_UPLOAD_MB", "2000"))
+OVERSIZE_CRF = int(os.getenv("OVERSIZE_CRF", "22"))
+OVERSIZE_PRESET = os.getenv("OVERSIZE_PRESET", "veryfast").strip() or "veryfast"
+OVERSIZE_THREADS = max(0, int(os.getenv("OVERSIZE_THREADS", "0")))  # 0 = auto
+OVERSIZE_MAX_SIDE = int(os.getenv("OVERSIZE_MAX_SIDE", "1080"))  # short-side cap, px; 0 = keep
+OVERSIZE_AUDIO_BITRATE = os.getenv("OVERSIZE_AUDIO_BITRATE", "192k").strip() or "192k"
 MAX_SOURCE_DOWNLOAD_MB = max(
     MAX_UNIQUE_SIZE_MB,
     int(os.getenv("MAX_SOURCE_DOWNLOAD_MB", "1024")),
@@ -64,6 +75,16 @@ if MAX_USER_UPLOAD_MB < MAX_UNIQUE_SIZE_MB:
     raise ValueError("MAX_USER_UPLOAD_MB must be >= MAX_UNIQUE_SIZE_MB")
 if MAX_SEND_MB < 1:
     raise ValueError("MAX_SEND_MB must be >= 1")
+if ORIGINAL_SEND_MAX_MB < MAX_UNIQUE_SIZE_MB:
+    raise ValueError("ORIGINAL_SEND_MAX_MB must be >= MAX_UNIQUE_SIZE_MB")
+if TELEGRAM_MAX_UPLOAD_MB < ORIGINAL_SEND_MAX_MB:
+    raise ValueError("TELEGRAM_MAX_UPLOAD_MB must be >= ORIGINAL_SEND_MAX_MB")
+if not 0 <= OVERSIZE_CRF <= 51:
+    raise ValueError("OVERSIZE_CRF must be between 0 and 51")
+if OVERSIZE_PRESET not in {"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"}:
+    raise ValueError("OVERSIZE_PRESET must be a libx264 preset name")
+if OVERSIZE_MAX_SIDE < 0:
+    raise ValueError("OVERSIZE_MAX_SIDE must be >= 0")
 if MAX_URL_LOGICAL_MB != MAX_UNIQUE_SIZE_MB:
     raise ValueError("MAX_URL_LOGICAL_MB must equal MAX_UNIQUE_SIZE_MB")
 

@@ -198,3 +198,19 @@ After deployment smoke-test:
 - Verify playlist fairness, 80 MB guard, Free 3-request quota, Premium 40 videos, Free/Premium channel limits.
 
 Never record bot tokens or `.env` contents here.
+
+## Logo upload root cause + oversize policy rewrite — 2026-11-16
+### Logo upload (❌ → fix)
+- Root cause: `ux_fixes._UxCallbackMiddleware` intercepts `wmlogo`/`cwmlogo` before `wm_wizard.logo_start`. When no logo was saved, `_show_logo_config()` showed "send PNG" but **never set `LogoStates.upload`**, so the PNG/photo/GIF reached no handler (`Update ... is not handled`, no `LOGO_DEBUG`).
+- Fix: `_show_logo_config()` and `_start_logo_edit()` now enter `LogoStates.upload` with clean wizard data (`logo_path=None`, defaults). `wmlogo` always targets the user watermark, `cwmlogo` the channel from `cid` (stale `channel` key no longer wins).
+- Tests: `tests/test_logo_entry_state.py`.
+
+### Oversize > 100 MB (no uniqueness)
+- 100–130 MB (`ORIGINAL_SEND_MAX_MB`): original as is (non-MP4 remuxed with stream copy).
+- > 130 MB: gentle CRF compression (`-crf 22 -preset veryfast`, all cores), 4K → 1080p only, AAC/MP3 audio copied. No target-size bitrate squeezing. If not smaller → original.
+- Old cause of failures: fixed 900 s per attempt with default (slow) preset on 2 threads; a timeout aborted the whole retry loop and then repeated without watermark.
+- Timeout now scales with duration (30 min … 6 h); timeout is not retried.
+- Oversize results are checked against `TELEGRAM_MAX_UPLOAD_MB` (2000) instead of 100 MB.
+- `send_video`/`send_audio` get `request_timeout` scaled by file size (aiogram default was 60 s).
+- Tests: `tests/test_oversize_policy.py`.
+- ⬜ VPS smoke: logo upload (photo/PNG/GIF) → save → video; 110 MB video → original; 300 MB video → compressed, picture/sound OK.

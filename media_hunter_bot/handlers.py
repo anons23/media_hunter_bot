@@ -63,6 +63,7 @@ from .config import (
     MAX_USER_UPLOAD_MB,
     MEDIA_DIR,
     PREMIUM_PLANS,
+    TELEGRAM_MAX_UPLOAD_MB,
 )
 from . import db
 from .processor import (
@@ -79,6 +80,19 @@ from .processor import (
     validate_source_url,
 )
 from .oversize_processor import compress_for_send
+
+
+def upload_timeout(path: Path) -> int:
+    """aiogram request timeout for sending a file.
+
+    The default session timeout is 60 s, which is too short for 100 MB+
+    uploads to the Bot API. Allow ~2 s per MB (min 120 s, max 1 h).
+    """
+    try:
+        size_mb = path.stat().st_size / (1024 * 1024)
+    except OSError:
+        size_mb = 0
+    return int(min(3600, max(120, 60 + size_mb * 2)))
 from .progress import ProgressTracker
 from .opp_logic import opp_check
 from .opp_admin import register_opp_admin
@@ -447,9 +461,9 @@ class Engine:
                     register=register,
                 )
             elif size > max_unique_limit:
-                # >100 МБ и <= абсолютного лимита: uniqueness запрещена,
-                # но оригинал нельзя отправить через 100 MB Telegram ceiling.
-                # Поэтому делаем compression-only копию без unique filter.
+                # >100 МБ: уникализация запрещена.
+                # 100–130 МБ — отправляем оригинал как есть,
+                # >130 МБ — мягкое сжатие с сохранением качества (CRF).
                 result = await asyncio.to_thread(
                     compress_for_send,
                     source,
@@ -488,7 +502,13 @@ class Engine:
             meta = await asyncio.to_thread(metadata, source)
             caption = str(meta.get("description") or media_title or meta.get("title") or "")[:900]
             result_size = (await asyncio.to_thread(result.stat)).st_size
-            if result_size > send_limit:
+            if not audio_only and size > max_unique_limit:
+                # Oversize results go through the local Bot API (up to 2 GB).
+                if result_size > TELEGRAM_MAX_UPLOAD_MB * 1024 * 1024:
+                    raise RuntimeError(
+                        f"Результат превышает лимит отправки Telegram {TELEGRAM_MAX_UPLOAD_MB} МБ"
+                    )
+            elif result_size > send_limit:
                 raise RuntimeError(
                     f"Результат превышает лимит отправки {MAX_SEND_MB} МБ"
                 )
@@ -518,9 +538,9 @@ class Engine:
                             if (await asyncio.to_thread(cr.stat)).st_size > MAX_SEND_MB * 1024 * 1024:
                                 raise RuntimeError(f"После сжатия файл для канала всё ещё превышает лимит отправки {MAX_SEND_MB} МБ")
                     if cr.suffix.lower() == ".mp3":
-                        await self.bot.send_audio(ch["channel_id"], FSInputFile(cr, filename=safe_media_filename(media_title, cr.suffix or ".mp3")))
+                        await self.bot.send_audio(ch["channel_id"], FSInputFile(cr, filename=safe_media_filename(media_title, cr.suffix or ".mp3")), request_timeout=upload_timeout(cr))
                     else:
-                        await self.bot.send_video(ch["channel_id"], FSInputFile(cr, filename=safe_media_filename(media_title, cr.suffix or ".mp4")), caption=caption or None, supports_streaming=True)
+                        await self.bot.send_video(ch["channel_id"], FSInputFile(cr, filename=safe_media_filename(media_title, cr.suffix or ".mp4")), caption=caption or None, supports_streaming=True, request_timeout=upload_timeout(cr))
                 except Exception as e:
                     logger.exception("Autopost failed uid=%s channel=%s", j.uid, ch.get("channel_id"))
                     safe = user_facing_error(e)
@@ -563,9 +583,9 @@ class Engine:
     async def _send_private(self, uid: int, path: Path, caption: str, filename: str | None = None):
         name = filename or safe_media_filename(path.stem, path.suffix or ".mp4")
         if path.suffix.lower() == ".mp3":
-            await self.bot.send_audio(uid, FSInputFile(path, filename=name), caption=caption or None)
+            await self.bot.send_audio(uid, FSInputFile(path, filename=name), caption=caption or None, request_timeout=upload_timeout(path))
         else:
-            await self.bot.send_video(uid, FSInputFile(path, filename=name), caption=caption or None, supports_streaming=True)
+            await self.bot.send_video(uid, FSInputFile(path, filename=name), caption=caption or None, supports_streaming=True, request_timeout=upload_timeout(path))
         ad = await db.aget_setting("ad_text", "")
         button = await db.aget_setting("ad_button", "")
         url = await db.aget_setting("ad_url", "")

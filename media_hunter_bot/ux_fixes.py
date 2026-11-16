@@ -119,11 +119,21 @@ async def _delete_text(c: CallbackQuery, state: FSMContext):
 
 async def _show_logo_config(c: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    cid = _channel_id_from_state(data)
+    # "wmlogo" is always the user's own watermark, "cwmlogo" the channel
+    # opened via cwmx:<id>. Do not trust a stale "channel" key here.
+    if c.data == "wmlogo":
+        cid = None
+    else:
+        try:
+            cid = int(data["cid"]) if data.get("cid") is not None else _channel_id_from_state(data)
+        except (TypeError, ValueError):
+            cid = None
     watermark = await _get_watermark(c.from_user.id, cid)
     logo = str(watermark.get("logo") or "").strip() if watermark.get("type") == "image" else ""
     exists = bool(logo and Path(logo).exists())
     if exists:
+        # Remember the scope for the replace/delete buttons.
+        await state.update_data(channel=cid)
         scope = "для этого канала" if cid is not None else "для ваших видео"
         await c.answer()
         await _edit_or_answer(
@@ -139,24 +149,38 @@ async def _show_logo_config(c: CallbackQuery, state: FSMContext):
         )
         return
 
+    # The bot must actually wait for the logo: without LogoStates.upload the
+    # PNG/photo reaches no handler ("Update ... is not handled").
+    await _enter_logo_upload(state, cid)
     await c.answer()
     await _edit_or_answer(
         c,
-        "🖼 <b>Логотип</b>\n\nСейчас логотип не настроен. Отправьте PNG-файл, чтобы добавить его к видео.",
+        "🖼 <b>Логотип</b>\n\nСейчас логотип не настроен. Отправьте PNG, GIF или фото из галереи, чтобы добавить его к видео.",
         _kb([[_b("◀️ Назад", "wm" if cid is None else "channels")]]),
+    )
+
+
+async def _enter_logo_upload(state: FSMContext, cid: int | None) -> None:
+    from .wm_wizard import LogoStates
+    await state.set_state(LogoStates.upload)
+    await state.update_data(
+        channel=cid,
+        logo_path=None,
+        logo_format=None,
+        logo_size=20,
+        logo_position="br",
+        logo_opacity=0.8,
     )
 
 
 async def _start_logo_edit(c: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     cid = _channel_id_from_state(data)
-    from .wm_wizard import LogoStates
-    await state.set_state(LogoStates.upload)
-    await state.update_data(channel=cid)
+    await _enter_logo_upload(state, cid)
     await c.answer()
     await _edit_or_answer(
         c,
-        "🖼 <b>Новый логотип</b>\n\nОтправьте PNG-файл логотипа.",
+        "🖼 <b>Новый логотип</b>\n\nОтправьте PNG, GIF или фото из галереи.",
         _kb([[_b("◀️ Назад", "wm" if cid is None else "channels")]]),
     )
 
