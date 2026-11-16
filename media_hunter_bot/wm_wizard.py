@@ -136,6 +136,46 @@ async def _store_text(uid, channel_id, text: str) -> dict:
         await db.aset_user_watermark(uid, w)
     return w
 
+_VIDEO_EXTS = (".mp4", ".mov", ".webm", ".mkv", ".m4v", ".avi")
+
+
+def _sniff_image(path: Path) -> str | None:
+    """'.png' / '.gif' by file signature, None for anything else."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(8)
+    except OSError:
+        return None
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    return None
+
+
+def _document_logo_ext(doc, uid) -> str:
+    """Expected extension of a logo sent as a file (name OR mime type).
+
+    Phones often send files without an extension or with a generic name, so the
+    MIME type counts too. The bytes are checked again after download.
+    """
+    name = (getattr(doc, "file_name", None) or "").lower()
+    mime = (getattr(doc, "mime_type", None) or "").lower()
+    suffix = Path(name).suffix
+    logger.info("LOGO_DOCUMENT uid=%s ext=%s mime=%s size=%s", uid, suffix or "-", mime or "-", getattr(doc, "file_size", None))
+    if suffix == ".png" or mime == "image/png":
+        return ".png"
+    if suffix == ".gif" or mime == "image/gif":
+        return ".gif"
+    if suffix in _VIDEO_EXTS or mime.startswith("video"):
+        raise ValueError("Это видео, а не GIF. Нужен файл .gif или .png — анимацию в формате MP4 бот как логотип не принимает.")
+    if not suffix and not mime:
+        # Unknown: let the signature check after download decide.
+        return ".gif"
+    what = suffix.lstrip(".").upper() or "этот формат"
+    raise ValueError(f"Нужен PNG или GIF-файл, а пришёл {what}.")
+
+
 async def _download_logo_message(message: Message, bot) -> tuple[Path,str]:
     LOGO_DIR.mkdir(parents=True, exist_ok=True)
     uid = message.from_user.id if message.from_user else 0; token = uuid.uuid4().hex
@@ -143,9 +183,8 @@ async def _download_logo_message(message: Message, bot) -> tuple[Path,str]:
     if message.photo:
         file_id, ext, fmt, raw = message.photo[-1].file_id, ".jpg", "PNG", LOGO_DIR/f".upload_{uid}_{token}.jpg"
     elif message.document:
-        name = (message.document.file_name or "").lower()
-        if not name.endswith((".png", ".gif")): raise ValueError("Нужен PNG или GIF-файл.")
-        file_id, ext, fmt, raw = message.document.file_id, Path(name).suffix.lower(), Path(name).suffix[1:].upper(), LOGO_DIR/f".upload_{uid}_{token}{Path(name).suffix.lower()}"
+        ext = _document_logo_ext(message.document, uid)
+        file_id, fmt, raw = message.document.file_id, ext[1:].upper(), LOGO_DIR/f".upload_{uid}_{token}{ext}"
         kind = "document"
     elif message.animation:
         name = (message.animation.file_name or "").lower()
@@ -166,6 +205,14 @@ async def _download_logo_message(message: Message, bot) -> tuple[Path,str]:
             final = LOGO_DIR/f"logo_{uid}_{token}.png"
             await asyncio.to_thread(_convert_photo_to_png, raw, final); raw.unlink(missing_ok=True)
         else:
+            # Trust the bytes, not the file name: a GIF named "logo" or a
+            # PNG named ".gif" must still work; an MP4 named ".gif" must not.
+            real = _sniff_image(raw)
+            if real is None:
+                raise ValueError("Файл не похож на PNG или GIF. Пришлите настоящий PNG или GIF.")
+            ext = real
+            max_mb = MAX_LOGO_GIF_MB if ext == ".gif" else MAX_WATERMARK_MB
+            if raw.stat().st_size > max_mb*1024*1024: raise ValueError(f"Файл слишком большой. Максимум {max_mb} МБ.")
             final = LOGO_DIR/f"logo_{uid}_{token}{ext}"; raw.rename(final)
         ok,msg = await asyncio.to_thread(validate_logo, final, max_mb)
         if not ok: final.unlink(missing_ok=True); raise ValueError(msg)
