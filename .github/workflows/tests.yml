@@ -22,6 +22,6 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r media_hunter_bot/requirements.txt
       - name: Compile
-        run: python -m py_compile media_hunter_bot/processor.py media_hunter_bot/handlers.py media_hunter_bot/db.py media_hunter_bot/config.py media_hunter_bot/playlist_support.py media_hunter_bot/optimized_processor.py media_hunter_bot/process_cache.py media_hunter_bot/logo_upload_fix.py media_hunter_bot/logo_photo_fallback.py media_hunter_bot/legacy_watermark_guard.py media_hunter_bot/oversize_processor.py media_hunter_bot/ux_fixes.py media_hunter_bot/wm_wizard.py media_hunter_bot/plate.py media_hunter_bot/webapp.py main.py
+        run: python -m py_compile media_hunter_bot/processor.py media_hunter_bot/handlers.py media_hunter_bot/db.py media_hunter_bot/config.py media_hunter_bot/playlist_support.py media_hunter_bot/optimized_processor.py media_hunter_bot/process_cache.py media_hunter_bot/logo_upload_fix.py media_hunter_bot/logo_photo_fallback.py media_hunter_bot/legacy_watermark_guard.py media_hunter_bot/oversize_processor.py media_hunter_bot/ux_fixes.py media_hunter_bot/wm_wizard.py media_hunter_bot/plate.py media_hunter_bot/webapp.py media_hunter_bot/textmark.py main.py
       - name: Regression tests
         run: python -m unittest discover -s tests -v

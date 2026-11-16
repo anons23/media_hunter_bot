@@ -35,6 +35,39 @@ With the default configuration:
 
 The 100 MB value is the logical unique-processing threshold, not the Telegram transport limit. A local Telegram Bot API can accept larger files according to its configured capabilities.
 
+### Mini App editors (plate and text watermark)
+
+The bot serves two Telegram Mini Apps from its own process: the plate editor
+(`/`) — drag, resize, opacity, when it appears/disappears, fade — and the text
+watermark editor (`/text`) — text, 15 bundled Cyrillic fonts, colour palette,
+shadow / outline / background box, ready-made styles, drag and resize.
+Telegram opens Mini Apps only over HTTPS:
+
+1. Point a (sub)domain to the VPS, e.g. `app.example.com`.
+2. nginx + Let's Encrypt:
+
+```nginx
+server {
+    server_name app.example.com;
+    location / {
+        proxy_pass http://127.0.0.1:8090;
+        proxy_set_header Host $host;
+    }
+    listen 80;
+}
+```
+```bash
+sudo certbot --nginx -d app.example.com
+```
+3. In `.env`: `WEBAPP_URL=https://app.example.com` and restart the bot.
+
+Without `WEBAPP_URL` the bot keeps the old button-based settings. Every API
+call is checked with Telegram `initData` (HMAC of the bot token), so users can
+only edit their own plates/texts and their own channels.
+
+Fonts live in `media_hunter_bot/fonts` (OFL, licences in `fonts/licenses`);
+rebuild them with `tools/build_fonts.py` from a google/fonts checkout.
+
 ### Keeping yt-dlp fresh
 
 Sites change often and old yt-dlp versions stop downloading. Update it about once a week:

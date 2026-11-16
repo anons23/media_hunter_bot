@@ -15,6 +15,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from . import db
 from .config import LOGO_DIR, MAX_LOGO_GIF_MB, MAX_LOGO_GIF_SECONDS, MAX_WATERMARK_MB, WEBAPP_URL
 from . import plate as plate_mod
+from . import textmark
 from .processor import _is_valid_color, validate_logo
 
 logger = logging.getLogger(__name__)
@@ -115,6 +116,26 @@ async def _store_plate(uid, channel_id, logo: Path) -> dict:
         await db.aset_user_watermark(uid, w)
     return w
 
+def text_editor_keyboard(channel_id, back: str):
+    from .webapp import editor_url
+    rows = []
+    if WEBAPP_URL:
+        rows.append([InlineKeyboardButton(text="🎛 Настроить надпись", web_app=WebAppInfo(url=editor_url(channel_id, "text")))])
+    rows.append([_B("◀️ Назад", back)])
+    return _kb(rows)
+
+async def _store_text(uid, channel_id, text: str) -> dict:
+    """Save a new text watermark, keeping the style of the previous one."""
+    old = await (db.aget_channel_watermark(channel_id, uid) if channel_id else asyncio.to_thread(db.get_user_watermark, uid))
+    base = textmark.normalize(old) if textmark.is_new_format(old) else textmark.normalize({"type": "text", "x": 0.5, "y": 0.92, "style": "shadow"})
+    w = textmark.to_watermark({**base, "text": text})
+    if channel_id:
+        if not any(x["channel_id"] == channel_id for x in await db.alist_channels(uid)): raise ValueError("Канал больше не подключён.")
+        await db.aset_channel_watermark(channel_id, uid, w)
+    else:
+        await db.aset_user_watermark(uid, w)
+    return w
+
 async def _download_logo_message(message: Message, bot) -> tuple[Path,str]:
     LOGO_DIR.mkdir(parents=True, exist_ok=True)
     uid = message.from_user.id if message.from_user else 0; token = uuid.uuid4().hex
@@ -179,7 +200,17 @@ def register_wm_wizard(router: Router, menu_fn):
     @router.message(WmStates.text)
     async def wm_got_text(m,state):
         if not m.text or not m.text.strip(): await m.answer("❌ Пришлите обычный текст (не файл)."); return
-        text=m.text.strip()[:200]; await state.update_data(wm_text=text); await state.set_state(None)
+        text=m.text.strip()[:200]
+        if WEBAPP_URL:
+            cleaned=textmark.clean_text(text)
+            if not cleaned: await m.answer("❌ В тексте нет символов, которые можно вывести на видео (эмодзи не поддерживаются)."); return
+            data=await state.get_data(); cid=data.get("channel")
+            try: w=await _store_text(m.from_user.id, cid, cleaned)
+            except ValueError as e: await state.clear(); await m.answer(f"❌ {e}"); return
+            await state.clear()
+            await m.answer(f"✅ <b>Надпись сохранена</b>\n\nТеперь откройте редактор: перетащите текст на нужное место, выберите шрифт, цвет и эффект.\n\nСейчас: {textmark.describe(textmark.normalize(w))}.",reply_markup=text_editor_keyboard(cid,"wm" if cid is None else "channels"),parse_mode="HTML")
+            return
+        await state.update_data(wm_text=text); await state.set_state(None)
         rows=[[ _B(lab,f"wmcolor:{code}") for code,lab in pair] for pair in _chunk(COLORS,2)]+[[_B("❌ Отмена","wm_cancel")]]
         await m.answer(f"Текст: <b>{text}</b>\n\n🎨 Выберите цвет:",reply_markup=_kb(rows),parse_mode="HTML")
 

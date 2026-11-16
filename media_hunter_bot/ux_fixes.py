@@ -61,11 +61,28 @@ async def _edit_or_answer(c: CallbackQuery, text: str, markup):
     await c.answer(text[:180], show_alert=True)
 
 
+def _scope_from_callback(c: CallbackQuery, data: dict) -> int | None:
+    """wm* buttons = user's own watermark, cwm* = the channel opened via cwmx:<id>."""
+    if not (c.data or "").startswith("cwm"):
+        return None
+    try:
+        return int(data["cid"]) if data.get("cid") is not None else _channel_id_from_state(data)
+    except (TypeError, ValueError):
+        return None
+
+
 async def _show_text_config(c: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    cid = _channel_id_from_state(data)
+    cid = _scope_from_callback(c, data)
+    await state.update_data(channel=cid)
     watermark = await _get_watermark(c.from_user.id, cid)
     text = str(watermark.get("text") or "").strip() if watermark.get("type") == "text" else ""
+    from .config import WEBAPP_URL
+    editor_row = []
+    if WEBAPP_URL:
+        from aiogram.types import WebAppInfo
+        from .webapp import editor_url
+        editor_row = [[InlineKeyboardButton(text="🎛 Настроить надпись", web_app=WebAppInfo(url=editor_url(cid, "text")))]]
     if text:
         scope = "для этого канала" if cid is not None else "для ваших видео"
         await c.answer()
@@ -73,8 +90,9 @@ async def _show_text_config(c: CallbackQuery, state: FSMContext):
             c,
             "💧 <b>Текст водяного знака уже настроен</b>\n\n"
             f"📝 Сейчас {scope}: <code>{html.escape(text)}</code>\n\n"
-            "Можно изменить его или удалить. После удаления видео будут без этого водяного знака.",
-            _kb([
+            + ("Место, размер, шрифт и цвет меняются в редакторе. " if WEBAPP_URL else "")
+            + "Можно изменить текст или удалить. После удаления видео будут без этого водяного знака.",
+            _kb(editor_row + [
                 [_b("✏️ Изменить текст", "wmtext_edit")],
                 [_b("🗑 Удалить водяной знак", "wmtext_delete")],
                 [_b("◀️ Назад", "wm" if cid is None else "channels")],
@@ -82,11 +100,13 @@ async def _show_text_config(c: CallbackQuery, state: FSMContext):
         )
         return
 
+    replaces = "\n\n⚠️ Сейчас у вас плашка — новая надпись заменит её." if watermark.get("type") == "image" else ""
     await c.answer()
     await _edit_or_answer(
         c,
-        "📝 <b>Текстовый водяной знак</b>\n\nСейчас текст не настроен. Пришлите его одним сообщением.",
-        _kb([[_b("◀️ Назад", "wm" if cid is None else "channels")]]),
+        "📝 <b>Текстовый водяной знак</b>\n\nСейчас текст не настроен. Пришлите его одним сообщением"
+        + (" или откройте редактор." if WEBAPP_URL else ".") + replaces,
+        _kb(editor_row + [[_b("◀️ Назад", "wm" if cid is None else "channels")]]),
     )
     await state.set_state(WmStates.text)
     await state.update_data(channel=cid, wm_text=None, wm_color="white", wm_size=28, wm_position="br", wm_opacity=0.8, wm_font="sans")

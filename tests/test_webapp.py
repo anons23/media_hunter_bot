@@ -118,5 +118,35 @@ class WebAppApiTests(AioHTTPTestCase):
         self.assertIn("telegram-web-app.js", await resp.text())
 
 
+    async def test_text_editor_flow(self):
+        resp = await self.client.get("/api/text?scope=u", headers=self.h(7))
+        data = await resp.json()
+        self.assertFalse(data["has_text"])
+        self.assertTrue(data["replaces_plate"])  # user 7 has a plate
+        self.assertIn("montserrat", [f["id"] for f in data["fonts"]])
+
+        bad = await self.client.post("/api/text?scope=u", headers=self.h(7), json={"text": {"text": "🔥"}})
+        self.assertEqual(bad.status, 400)
+
+        body = {"text": {"text": "Мой канал", "font": "lobster", "color": "#ff8a00", "x": 0.2, "y": 0.8,
+                         "size": 0.06, "style": "outline", "accent": "#000000", "opacity": 1}}
+        ok = await self.client.post("/api/text?scope=u", headers=self.h(7), json=body)
+        self.assertEqual(ok.status, 200)
+        saved = db.get_user_watermark(7)
+        self.assertEqual((saved["type"], saved["text"], saved["font"], saved["color"]), ("text", "Мой канал", "lobster", "#FF8A00"))
+
+        resp = await self.client.post("/api/text/delete?scope=u", headers=self.h(7), json={})
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(db.get_user_watermark(7), {})
+
+    async def test_fonts_and_text_page_served(self):
+        font = await self.client.get("/fonts/montserrat.ttf")
+        self.assertEqual(font.status, 200)
+        missing = await self.client.get("/fonts/..%2Fwebapp.ttf")
+        self.assertEqual(missing.status, 404)
+        page = await self.client.get("/text")
+        self.assertIn("Надпись на видео", await page.text())
+
+
 if __name__ == "__main__":
     unittest.main()

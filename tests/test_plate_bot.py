@@ -45,5 +45,23 @@ class PlateBotTests(unittest.TestCase):
         self.assertIsNone(handlers.plate_user_note(wm, {}, 1000, True))
 
 
+    def test_text_editor_button(self):
+        with patch.object(wm_wizard, "WEBAPP_URL", "https://app.example.com"), \
+             patch.object(webapp, "WEBAPP_URL", "https://app.example.com"):
+            kb = wm_wizard.text_editor_keyboard(None, "wm")
+        self.assertEqual(kb.inline_keyboard[0][0].web_app.url, "https://app.example.com/text?scope=u")
+
+    def test_new_text_keeps_previous_style(self):
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(db, "DB_PATH", Path(td) / "t.db"), patch.object(db, "ensure_directories", lambda: None):
+                db.init_db()
+                db.ensure_user(7)
+                db.set_user_watermark(7, {"type": "text", "text": "old", "x": 0.1, "y": 0.2, "size": 0.07,
+                                          "font": "lobster", "style": "box", "color": "#FF8A00"})
+                asyncio.run(wm_wizard._store_text(7, None, "new"))
+                saved = db.get_user_watermark(7)
+        self.assertEqual((saved["text"], saved["font"], saved["style"], saved["x"]), ("new", "lobster", "box", 0.1))
+
+
 if __name__ == "__main__":
     unittest.main()

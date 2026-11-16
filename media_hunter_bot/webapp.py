@@ -24,6 +24,7 @@ from aiohttp import web
 
 from . import db
 from . import plate as plate_mod
+from . import textmark
 from .config import BOT_TOKEN, WEBAPP_HOST, WEBAPP_PORT, WEBAPP_URL
 from .processor import _logo_path
 
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent / "webapp_static"
 INIT_DATA_MAX_AGE = 24 * 3600
+BOT_KEY = web.AppKey("bot", object)
 
 
 def verify_init_data(init_data: str, bot_token: str, max_age: int = INIT_DATA_MAX_AGE) -> dict[str, Any] | None:
@@ -67,9 +69,10 @@ def verify_init_data(init_data: str, bot_token: str, max_age: int = INIT_DATA_MA
     return user
 
 
-def editor_url(channel_id: int | None = None) -> str:
+def editor_url(channel_id: int | None = None, page: str = "") -> str:
+    """Mini App URL: page "" = plate editor, "text" = text watermark editor."""
     scope = "u" if channel_id is None else f"c{int(channel_id)}"
-    return f"{WEBAPP_URL}/?scope={scope}"
+    return f"{WEBAPP_URL}/{page}?scope={scope}"
 
 
 def _parse_scope(raw: str | None) -> int | None:
@@ -178,7 +181,7 @@ async def save_plate(request: web.Request) -> web.Response:
     }
     await _store(uid, channel_id, value)
     logger.info("PLATE_SAVED uid=%s channel=%s plate=%s", uid, channel_id, value)
-    bot = request.app["bot"]
+    bot = request.app[BOT_KEY]
     scope = "для канала" if channel_id is not None else "для ваших видео"
     try:
         await bot.send_message(uid, f"✅ Плашка сохранена {scope}: {plate_mod.describe(clean)}.")
@@ -195,10 +198,76 @@ async def delete_plate(request: web.Request) -> web.Response:
     if wm.get("type") == "image":
         await _store(uid, channel_id, {})
         try:
-            await request.app["bot"].send_message(uid, "🗑 Плашка удалена. Видео будут без неё.")
+            await request.app[BOT_KEY].send_message(uid, "🗑 Плашка удалена. Видео будут без неё.")
         except Exception:
             pass
     return web.json_response({"ok": True})
+
+
+async def get_text(request: web.Request) -> web.Response:
+    uid, channel_id = await _auth(request)
+    wm = await _load(uid, channel_id)
+    has_text = wm.get("type") == "text" and bool(wm.get("text"))
+    cfg = textmark.normalize(wm if has_text else {"type": "text", "x": 0.5, "y": 0.92, "style": "shadow"})
+    return web.json_response({
+        "has_text": has_text,
+        "replaces_plate": wm.get("type") == "image",
+        "text": cfg,
+        "fonts": [{"id": k, "label": v} for k, v in textmark.FONTS.items()],
+        "palette": textmark.PALETTE,
+        "limits": {"chars": textmark.MAX_TEXT, "lines": textmark.MAX_LINES,
+                   "min_size": textmark.MIN_SIZE, "max_size": textmark.MAX_SIZE},
+    })
+
+
+async def save_text(request: web.Request) -> web.Response:
+    uid, channel_id = await _auth(request)
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise web.HTTPBadRequest(text="bad json")
+    incoming = body.get("text") if isinstance(body, dict) else None
+    if not isinstance(incoming, dict):
+        raise web.HTTPBadRequest(text="bad text")
+    value = textmark.to_watermark(incoming)
+    if not value["text"]:
+        raise web.HTTPBadRequest(text="Введите текст надписи.")
+    await _store(uid, channel_id, value)
+    logger.info("TEXT_WM_SAVED uid=%s channel=%s font=%s style=%s", uid, channel_id, value["font"], value["style"])
+    scope = "для канала" if channel_id is not None else "для ваших видео"
+    try:
+        await request.app[BOT_KEY].send_message(uid, f"✅ Надпись сохранена {scope}: {textmark.describe(value)}.")
+    except Exception:
+        logger.warning("TEXT_WM_SAVED notify failed uid=%s", uid)
+    return web.json_response({"ok": True, "text": {k: v for k, v in value.items() if k != "type"}})
+
+
+async def delete_text(request: web.Request) -> web.Response:
+    uid, channel_id = await _auth(request)
+    wm = await _load(uid, channel_id)
+    if wm.get("type") == "text":
+        await _store(uid, channel_id, {})
+        try:
+            await request.app[BOT_KEY].send_message(uid, "🗑 Надпись удалена. Видео будут без неё.")
+        except Exception:
+            pass
+    return web.json_response({"ok": True})
+
+
+async def font_file(request: web.Request) -> web.FileResponse:
+    font_id = request.match_info["font"]
+    if font_id not in textmark.FONTS:
+        raise web.HTTPNotFound()
+    resp = web.FileResponse(textmark.font_path(font_id))
+    resp.headers["Cache-Control"] = "public, max-age=604800"
+    resp.content_type = "font/ttf"
+    return resp
+
+
+async def text_page(request: web.Request) -> web.FileResponse:
+    resp = web.FileResponse(STATIC_DIR / "text.html")
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 async def index(request: web.Request) -> web.FileResponse:
@@ -217,12 +286,17 @@ async def _security_headers(request: web.Request, handler):
 
 def build_app(bot) -> web.Application:
     app = web.Application(middlewares=[_security_headers], client_max_size=64 * 1024)
-    app["bot"] = bot
+    app[BOT_KEY] = bot
     app.router.add_get("/", index)
     app.router.add_get("/api/plate", get_plate)
     app.router.add_get("/api/plate/image", get_image)
     app.router.add_post("/api/plate", save_plate)
     app.router.add_post("/api/plate/delete", delete_plate)
+    app.router.add_get("/text", text_page)
+    app.router.add_get("/api/text", get_text)
+    app.router.add_post("/api/text", save_text)
+    app.router.add_post("/api/text/delete", delete_text)
+    app.router.add_get("/fonts/{font}.ttf", font_file)
     return app
 
 

@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Надпись</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #0f1115);
+    --card: var(--tg-theme-secondary-bg-color, #191c22);
+    --text: var(--tg-theme-text-color, #f2f3f5);
+    --hint: var(--tg-theme-hint-color, #8b919c);
+    --accent: var(--tg-theme-button-color, #2f8cff);
+    --accent-text: var(--tg-theme-button-text-color, #fff);
+    --danger: var(--tg-theme-destructive-text-color, #ff5a5f);
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { padding: 12px 14px calc(16px + env(safe-area-inset-bottom)); }
+  h1 { font-size: 17px; margin: 2px 0 10px; font-weight: 650; display: flex; align-items: center; justify-content: space-between; }
+  .seg { display: inline-flex; background: var(--card); border-radius: 10px; padding: 3px; gap: 2px; }
+  .seg button { border: 0; background: transparent; color: var(--hint); font: inherit; font-size: 13px; padding: 6px 10px; border-radius: 8px; cursor: pointer; }
+  .seg button.on { background: var(--accent); color: var(--accent-text); }
+  .seg.full { display: flex; width: 100%; }
+  .seg.full button { flex: 1; padding: 8px 4px; }
+  .warn { background: rgba(255,170,0,.14); color: #ffcf66; border-radius: 12px; padding: 9px 12px; font-size: 13px; margin-bottom: 10px; }
+
+  .stage-wrap { display: flex; justify-content: center; margin-bottom: 8px; }
+  .stage { position: relative; overflow: hidden; border-radius: var(--radius); touch-action: none; user-select: none; -webkit-user-select: none;
+    background:
+      radial-gradient(120% 70% at 30% 20%, #2b3a55 0%, transparent 60%),
+      radial-gradient(90% 60% at 80% 85%, #4a2f3a 0%, transparent 60%),
+      linear-gradient(160deg, #1b2130, #101318);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.06); }
+  .stage.v { height: min(48vh, 460px); aspect-ratio: 9 / 16; }
+  .stage.h { width: 100%; aspect-ratio: 16 / 9; }
+  .stage .play { position: absolute; left: 50%; top: 50%; width: 50px; height: 50px; margin: -25px 0 0 -25px; border-radius: 50%; background: rgba(255,255,255,.07); pointer-events: none; }
+  .stage .play::after { content: ""; position: absolute; left: 19px; top: 14px; border-left: 17px solid rgba(255,255,255,.3); border-top: 11px solid transparent; border-bottom: 11px solid transparent; }
+  .guide { position: absolute; background: rgba(47,140,255,.9); display: none; pointer-events: none; }
+  .guide.gx { top: 0; bottom: 0; width: 1px; left: 50%; }
+  .guide.gy { left: 0; right: 0; height: 1px; top: 50%; }
+  #wm { position: absolute; white-space: pre; line-height: 1.32; touch-action: none; cursor: grab; }
+  #wm .frame { position: absolute; inset: -3px; border: 1.5px dashed rgba(255,255,255,.8); border-radius: 4px; pointer-events: none; }
+  #wm .handle { position: absolute; right: -10px; bottom: -10px; width: 22px; height: 22px; border-radius: 50%; background: var(--accent); border: 2px solid #fff; cursor: nwse-resize; touch-action: none; }
+  .hint { color: var(--hint); font-size: 12.5px; }
+  .center { text-align: center; margin: 0 0 10px; }
+
+  .card { background: var(--card); border-radius: var(--radius); padding: 12px; margin-bottom: 10px; }
+  .card h2 { font-size: 13px; color: var(--hint); font-weight: 500; margin: 0 0 8px; text-transform: uppercase; letter-spacing: .04em; }
+  textarea { width: 100%; resize: none; border: 0; border-radius: 10px; padding: 10px 12px; font: inherit; font-size: 16px;
+    background: rgba(127,127,127,.14); color: var(--text); outline: none; }
+  .scroller { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none; }
+  .scroller::-webkit-scrollbar { display: none; }
+  .chip { flex: none; border: 1.5px solid transparent; border-radius: 12px; padding: 8px 12px; cursor: pointer; text-align: center;
+    background: rgba(127,127,127,.14); color: var(--text); font: inherit; }
+  .chip.on { border-color: var(--accent); background: rgba(47,140,255,.14); }
+  .chip .big { display: block; font-size: 22px; line-height: 1.1; }
+  .chip .small { display: block; font-size: 11px; color: var(--hint); margin-top: 3px; font-family: -apple-system, Roboto, sans-serif; }
+  .preset { min-width: 86px; padding: 10px; background: linear-gradient(160deg, #2a3348, #1a1f2b); }
+  .preset .big { font-size: 18px; white-space: nowrap; }
+  .swatches { display: grid; grid-template-columns: repeat(10, 1fr); gap: 7px; }
+  .sw { aspect-ratio: 1; border-radius: 50%; border: 2px solid rgba(255,255,255,.15); cursor: pointer; position: relative; padding: 0; }
+  .sw.on { outline: 2.5px solid var(--accent); outline-offset: 2px; }
+  .sw.custom { background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red); }
+  .sw.custom input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .row + .row { margin-top: 12px; }
+  .row > label:first-child { min-width: 118px; font-size: 14px; }
+  .val { color: var(--hint); font-size: 13px; min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
+  input[type=range] { flex: 1; accent-color: var(--accent); height: 28px; }
+  .mt { margin-top: 12px; }
+  .btn { width: 100%; border: 0; border-radius: 12px; padding: 12px; font: inherit; font-weight: 600; cursor: pointer; }
+  .btn.del { background: transparent; color: var(--danger); font-weight: 500; }
+  .btn.save { background: var(--accent); color: var(--accent-text); }
+  .empty { text-align: center; padding: 40px 10px; color: var(--hint); }
+  .empty b { display: block; color: var(--text); font-size: 17px; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<div id="app" hidden>
+  <h1>
+    <span>Надпись на видео</span>
+    <span class="seg" id="aspect"><button data-a="v" class="on">9:16</button><button data-a="h">16:9</button></span>
+  </h1>
+  <div class="warn" id="warn" hidden>Сейчас у вас плашка. Сохранение надписи заменит её.</div>
+
+  <div class="stage-wrap">
+    <div class="stage v" id="stage">
+      <div class="play"></div>
+      <div class="guide gx" id="gx"></div><div class="guide gy" id="gy"></div>
+      <div id="wm"><span id="wmText"></span><div class="frame"></div><div class="handle" id="handle"></div></div>
+    </div>
+  </div>
+  <p class="hint center">Перетащите надпись пальцем, размер — за синий уголок</p>
+
+  <div class="card">
+    <h2>Текст</h2>
+    <textarea id="txt" rows="2" placeholder="Например: @мой_канал"></textarea>
+    <div class="hint" id="txtHint" style="margin-top:6px"></div>
+  </div>
+
+  <div class="card"><h2>Готовые стили</h2><div class="scroller" id="presets"></div></div>
+  <div class="card"><h2>Шрифт</h2><div class="scroller" id="fonts"></div></div>
+
+  <div class="card">
+    <h2>Цвет текста</h2>
+    <div class="swatches" id="colors"></div>
+  </div>
+
+  <div class="card">
+    <h2>Эффект</h2>
+    <div class="seg full" id="style">
+      <button data-s="plain">Нет</button><button data-s="shadow">Тень</button><button data-s="outline">Контур</button><button data-s="box">Подложка</button>
+    </div>
+    <div id="accentBlock" class="mt">
+      <div class="hint" style="margin-bottom:8px" id="accentLabel">Цвет эффекта</div>
+      <div class="swatches" id="accents"></div>
+      <div class="row mt" id="boxRow"><label for="boxOp">Подложка</label><input type="range" id="boxOp" min="10" max="100" step="5"><span class="val" id="boxOpV"></span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row"><label for="size">Размер</label><input type="range" id="size" min="15" max="250" step="1"><span class="val" id="sizeV"></span></div>
+    <div class="row"><label for="op">Непрозрачность</label><input type="range" id="op" min="10" max="100" step="5"><span class="val" id="opV"></span></div>
+  </div>
+
+  <button class="btn save" id="saveBtn" hidden>Сохранить</button>
+  <button class="btn del" id="del" hidden>Удалить надпись</button>
+</div>
+<div id="msg" class="empty" hidden></div>
+
+<script>
+(() => {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  const initData = (tg && tg.initData) || "";
+  const scope = new URLSearchParams(location.search).get("scope") || "u";
+  const $ = (id) => document.getElementById(id);
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  let S = null, LIM = { chars: 200, lines: 3, min_size: 0.015, max_size: 0.25 }, FONTS = [], PALETTE = [];
+
+  // Same set as textmark._ALLOWED: emoji and other symbols are not in the fonts.
+  const NOT_ALLOWED = /[^\n\u0020-\u007E\u00A0-\u00FF\u0400-\u045F\u0490\u0491\u2010-\u2027\u2030-\u203A\u20AC\u20BD\u2116\u2122]/g;
+  const PRESETS = [
+    { id: "classic", label: "Классика", font: "montserrat", color: "#FFFFFF", style: "shadow", accent: "#000000" },
+    { id: "outline", label: "Контур", font: "montserrat", color: "#FFFFFF", style: "outline", accent: "#000000" },
+    { id: "subtitle", label: "Субтитр", font: "manrope", color: "#FFFFFF", style: "box", accent: "#000000", box_opacity: 0.55 },
+    { id: "yellow", label: "Жёлтый", font: "rubik", color: "#FFD60A", style: "outline", accent: "#000000" },
+    { id: "neon", label: "Неон", font: "unbounded", color: "#00E5FF", style: "shadow", accent: "#D400FF" },
+    { id: "brand", label: "Бренд", font: "russo", color: "#FFFFFF", style: "box", accent: "#2F80FF", box_opacity: 0.9 },
+    { id: "elegant", label: "Элегант", font: "playfair", color: "#F5E6C8", style: "shadow", accent: "#000000" },
+    { id: "hand", label: "От руки", font: "caveat", color: "#FFFFFF", style: "shadow", accent: "#000000" },
+    { id: "retro", label: "Ретро", font: "lobster", color: "#FF8A00", style: "outline", accent: "#0B1F4D" },
+    { id: "pixel", label: "Пиксель", font: "pixel", color: "#B6FF3B", style: "box", accent: "#000000", box_opacity: 0.7 },
+  ];
+
+  function show(html) { $("app").hidden = true; $("msg").hidden = false; $("msg").innerHTML = html; }
+  async function api(path, opts = {}) {
+    const res = await fetch(path + "?scope=" + encodeURIComponent(scope), {
+      ...opts, headers: { "X-Telegram-Init-Data": initData, "Content-Type": "application/json" },
+    });
+    if (!res.ok) throw new Error((await res.text()) || res.statusText);
+    return res.json();
+  }
+  function rgba(hex, a) {
+    const n = parseInt(hex.slice(1), 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+  }
+  // Same rounding as textmark.effect_px on the server.
+  function effectPx(fs) {
+    if (S.style === "outline") return [Math.max(1, Math.round(fs * 0.08)), 0];
+    if (S.style === "box") return [Math.max(2, Math.round(fs * 0.35)), 0];
+    if (S.style === "shadow") return [0, Math.max(1, Math.round(fs * 0.06))];
+    return [0, 0];
+  }
+
+  const loaded = new Set();
+  function loadFont(id) {
+    if (loaded.has(id)) return Promise.resolve();
+    loaded.add(id);
+    const face = new FontFace("wm-" + id, `url(fonts/${id}.ttf)`);
+    return face.load().then((f) => { document.fonts.add(f); }).catch(() => {});
+  }
+
+  // ---------- render ----------
+  function layout(depth = 0) {
+    const st = $("stage"), el = $("wm"), t = $("wmText");
+    const W = st.clientWidth, H = st.clientHeight;
+    const fs = Math.max(8, Math.round(S.size * H));
+    const [pad, sh] = effectPx(fs);
+    t.textContent = S.text || "Ваш текст";
+    el.style.fontFamily = `"wm-${S.font}", sans-serif`;
+    el.style.fontSize = fs + "px";
+    el.style.color = rgba(S.color, S.opacity);
+    el.style.padding = pad + "px";
+    el.style.background = S.style === "box" ? rgba(S.accent, S.box_opacity * S.opacity) : "transparent";
+    el.style.webkitTextStroke = S.style === "outline" ? `${pad * 2}px ${rgba(S.accent, S.opacity)}` : "0";
+    el.style.paintOrder = "stroke fill";
+    el.style.textShadow = S.style === "shadow" ? `${sh}px ${sh}px 0 ${rgba(S.accent, Math.min(1, S.opacity * 0.7))}` : "none";
+    // keep the text inside the frame
+    if ((el.offsetWidth > W || el.offsetHeight > H) && depth < 6 && S.size > LIM.min_size) {
+      const k = Math.min(W / el.offsetWidth, H / el.offsetHeight);
+      S.size = clamp(+(S.size * k * 0.98).toFixed(4), LIM.min_size, LIM.max_size);
+      return layout(depth + 1);
+    }
+    el.style.left = S.x * (W - el.offsetWidth) + "px";
+    el.style.top = S.y * (H - el.offsetHeight) + "px";
+    $("size").value = Math.round(S.size * 1000); $("sizeV").textContent = (S.size * 100).toFixed(1) + "%";
+    $("op").value = Math.round(S.opacity * 100); $("opV").textContent = Math.round(S.opacity * 100) + "%";
+    $("boxOp").value = Math.round(S.box_opacity * 100); $("boxOpV").textContent = Math.round(S.box_opacity * 100) + "%";
+  }
+  function renderControls() {
+    document.querySelectorAll("#fonts .chip").forEach((c) => c.classList.toggle("on", c.dataset.f === S.font));
+    document.querySelectorAll("#colors .sw[data-c]").forEach((c) => c.classList.toggle("on", c.dataset.c === S.color));
+    document.querySelectorAll("#accents .sw[data-c]").forEach((c) => c.classList.toggle("on", c.dataset.c === S.accent));
+    document.querySelectorAll("#style button").forEach((b) => b.classList.toggle("on", b.dataset.s === S.style));
+    $("accentBlock").hidden = S.style === "plain";
+    $("boxRow").hidden = S.style !== "box";
+    $("accentLabel").textContent = { shadow: "Цвет тени", outline: "Цвет контура", box: "Цвет подложки" }[S.style] || "";
+    const lines = (S.text || "").split("\n").length;
+    $("txtHint").textContent = `${(S.text || "").length}/${LIM.chars} символов, до ${LIM.lines} строк. Эмодзи на видео не выводятся.`;
+    loadFont(S.font).then(() => layout());
+    layout();
+  }
+
+  // ---------- builders ----------
+  function swatches(container, key) {
+    PALETTE.forEach((c) => {
+      const b = document.createElement("button");
+      b.className = "sw"; b.style.background = c; b.dataset.c = c;
+      b.addEventListener("click", () => { S[key] = c; renderControls(); tick(); });
+      container.appendChild(b);
+    });
+    const custom = document.createElement("label");
+    custom.className = "sw custom";
+    const inp = document.createElement("input");
+    inp.type = "color";
+    inp.addEventListener("input", (e) => { S[key] = e.target.value.toUpperCase(); renderControls(); });
+    custom.appendChild(inp);
+    container.appendChild(custom);
+  }
+  function build() {
+    FONTS.forEach((f) => {
+      const b = document.createElement("button");
+      b.className = "chip"; b.dataset.f = f.id;
+      b.innerHTML = `<span class="big" style="font-family:'wm-${f.id}'">Аа</span><span class="small"></span>`;
+      b.querySelector(".small").textContent = f.label;
+      b.addEventListener("click", () => { S.font = f.id; renderControls(); tick(); });
+      $("fonts").appendChild(b);
+      loadFont(f.id);
+    });
+    PRESETS.forEach((p) => {
+      const b = document.createElement("button");
+      b.className = "chip preset";
+      const big = document.createElement("span");
+      big.className = "big"; big.textContent = "Аа";
+      big.style.fontFamily = `'wm-${p.font}'`; big.style.color = p.color;
+      if (p.style === "outline") { big.style.webkitTextStroke = `3px ${p.accent}`; big.style.paintOrder = "stroke fill"; }
+      if (p.style === "shadow") big.style.textShadow = `2px 2px 0 ${p.accent}`;
+      if (p.style === "box") { big.style.background = rgba(p.accent, p.box_opacity || 0.55); big.style.padding = "2px 8px"; }
+      const small = document.createElement("span");
+      small.className = "small"; small.textContent = p.label;
+      b.append(big, small);
+      b.addEventListener("click", () => {
+        Object.assign(S, { font: p.font, color: p.color, style: p.style, accent: p.accent, box_opacity: p.box_opacity || S.box_opacity });
+        renderControls(); tick();
+      });
+      $("presets").appendChild(b);
+    });
+    swatches($("colors"), "color");
+    swatches($("accents"), "accent");
+  }
+  const tick = () => tg && tg.HapticFeedback && tg.HapticFeedback.selectionChanged();
+
+  // ---------- drag & resize ----------
+  function setupDrag() {
+    const st = $("stage"), el = $("wm"), h = $("handle");
+    let mode = null, sx = 0, sy = 0, sl = 0, stp = 0, ss = 0;
+    el.addEventListener("pointerdown", (e) => {
+      mode = e.target === h ? "resize" : "move";
+      el.setPointerCapture(e.pointerId);
+      sx = e.clientX; sy = e.clientY; sl = el.offsetLeft; stp = el.offsetTop; ss = S.size;
+      e.preventDefault();
+    });
+    el.addEventListener("pointermove", (e) => {
+      if (!mode) return;
+      const W = st.clientWidth, H = st.clientHeight, dx = e.clientX - sx, dy = e.clientY - sy;
+      if (mode === "move") {
+        const fx = W - el.offsetWidth, fy = H - el.offsetHeight;
+        let x = fx > 0 ? clamp((sl + dx) / fx, 0, 1) : 0.5, y = fy > 0 ? clamp((stp + dy) / fy, 0, 1) : 0.5;
+        const snapX = Math.abs(x - 0.5) < 0.03, snapY = Math.abs(y - 0.5) < 0.03;
+        if (snapX) x = 0.5; if (snapY) y = 0.5;
+        $("gx").style.display = snapX ? "block" : "none"; $("gy").style.display = snapY ? "block" : "none";
+        S.x = +x.toFixed(4); S.y = +y.toFixed(4);
+      } else {
+        const ratio = Math.max((el.offsetWidth + dx) / el.offsetWidth, (el.offsetHeight + dy) / el.offsetHeight);
+        S.size = clamp(+(ss * (1 + (ratio - 1))).toFixed(4), LIM.min_size, LIM.max_size);
+      }
+      layout();
+    });
+    const end = () => { if (!mode) return; mode = null; $("gx").style.display = "none"; $("gy").style.display = "none"; tick(); };
+    el.addEventListener("pointerup", end); el.addEventListener("pointercancel", end);
+  }
+
+  // ---------- save / delete ----------
+  async function save() {
+    if (!S.text.trim()) { tg ? tg.showAlert("Введите текст надписи.") : alert("Введите текст"); return; }
+    try {
+      tg && tg.MainButton.showProgress();
+      await api("api/text", { method: "POST", body: JSON.stringify({ text: S }) });
+      tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+      tg ? tg.close() : show("<b>Сохранено</b>");
+    } catch (err) {
+      tg && tg.MainButton.hideProgress();
+      tg ? tg.showAlert("Не удалось сохранить: " + err.message) : alert(err.message);
+    }
+  }
+  function del() {
+    const go = async () => {
+      try { await api("api/text/delete", { method: "POST", body: "{}" }); tg ? tg.close() : show("<b>Надпись удалена</b>"); }
+      catch (err) { tg ? tg.showAlert(err.message) : alert(err.message); }
+    };
+    tg ? tg.showConfirm("Удалить надпись? Видео будут без неё.", (ok) => ok && go()) : confirm("Удалить?") && go();
+  }
+
+  function bind() {
+    document.querySelectorAll("#aspect button").forEach((b) => b.addEventListener("click", () => {
+      document.querySelectorAll("#aspect button").forEach((x) => x.classList.toggle("on", x === b));
+      $("stage").className = "stage " + b.dataset.a;
+      requestAnimationFrame(() => layout());
+    }));
+    document.querySelectorAll("#style button").forEach((b) => b.addEventListener("click", () => { S.style = b.dataset.s; renderControls(); tick(); }));
+    $("txt").addEventListener("input", (e) => {
+      let v = e.target.value.replace(/\r/g, "").replace(NOT_ALLOWED, "");
+      const lines = v.split("\n");
+      if (lines.length > LIM.lines) v = lines.slice(0, LIM.lines).join("\n");
+      v = v.slice(0, LIM.chars);
+      if (v !== e.target.value) e.target.value = v;
+      S.text = v; renderControls();
+    });
+    $("size").addEventListener("input", (e) => { S.size = e.target.value / 1000; layout(); });
+    $("op").addEventListener("input", (e) => { S.opacity = e.target.value / 100; layout(); });
+    $("boxOp").addEventListener("input", (e) => { S.box_opacity = e.target.value / 100; layout(); });
+    $("del").addEventListener("click", del);
+    window.addEventListener("resize", () => layout());
+    setupDrag();
+    if (tg) { tg.MainButton.setText("Сохранить надпись"); tg.MainButton.onClick(save); tg.MainButton.show(); }
+    else { $("saveBtn").hidden = false; $("saveBtn").addEventListener("click", save); }
+  }
+
+  async function boot() {
+    if (tg) { tg.ready(); tg.expand(); }
+    if (!initData) return show("<b>Откройте редактор из бота</b>Кнопка «🎛 Настроить надпись» в разделе водяного знака.");
+    try {
+      const data = await api("api/text");
+      S = data.text; FONTS = data.fonts; PALETTE = data.palette; LIM = data.limits || LIM;
+      $("warn").hidden = !data.replaces_plate;
+      $("del").hidden = !data.has_text;
+      $("txt").value = S.text || "";
+      $("txt").maxLength = LIM.chars;
+      $("app").hidden = false;
+      build(); bind(); renderControls();
+    } catch (err) {
+      show("<b>Не удалось открыть редактор</b>" + String(err.message || err).replace(/[<>&]/g, ""));
+    }
+  }
+  boot();
+})();
+</script>
+</body>
+</html>

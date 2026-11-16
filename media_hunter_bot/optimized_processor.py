@@ -241,7 +241,9 @@ def _video_cmd(
     else:
         vf_parts = [base_vf]
         if has_text:
-            text_filter = base._build_text_filter(watermark, work_dir)
+            w, h, _ = _probe_frame(source)
+            frame_h = _final_frame_size(w, h, unique=True, max_side=max_side)[1]
+            text_filter = base._build_text_filter(watermark, work_dir, frame_h)
             if text_filter:
                 vf_parts.append(text_filter)
         cmd += ["-vf", ",".join(vf_parts), "-af", _UNIQUE_AUDIO_FILTER]
@@ -285,7 +287,8 @@ def apply_watermark(
         fc = plate_mod.overlay_graph("", plate_mod.normalize(watermark), frame_w, duration)
         cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a?", "-af", _UNIQUE_AUDIO_FILTER, "-shortest"]
     elif has_text:
-        text_filter = base._build_text_filter(watermark, work_dir)
+        w, h, _ = _probe_frame(source)
+        text_filter = base._build_text_filter(watermark, work_dir, _final_frame_size(w, h, unique=False, max_side=None)[1])
         if not text_filter:
             return source
         cmd += ["-vf", text_filter, "-af", _UNIQUE_AUDIO_FILTER]

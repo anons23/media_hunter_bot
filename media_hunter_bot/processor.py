@@ -353,7 +353,10 @@ def _positions_overlay(pos: str) -> str:
     return {"tl": "x=10:y=10", "tr": "x=W-w-10:y=10", "bl": "x=10:y=H-h-10", "br": "x=W-w-10:y=H-h-10", "c": "x=(W-w)/2:y=(H-h)/2"}.get(pos, "x=W-w-10:y=H-h-10")
 
 
-def _build_text_filter(wm: dict[str, Any], work_dir: Path) -> str | None:
+def _build_text_filter(wm: dict[str, Any], work_dir: Path, frame_h: int | None = None) -> str | None:
+    from . import textmark
+    if textmark.is_new_format(wm):
+        return textmark.drawtext_filter(textmark.normalize(wm), frame_h or 1080, work_dir)
     text = str(wm.get("text", ""))
     if not text:
         return None
@@ -366,7 +369,7 @@ def _build_text_filter(wm: dict[str, Any], work_dir: Path) -> str | None:
     textfile.write_text(text, encoding="utf-8")
     font = _find_font(str(wm.get("font", "sans")))
     font_opt = f":fontfile='{font}'" if font else ""
-    return f"drawtext=textfile='{textfile}':{_positions_text(str(wm.get('position', 'br')))}:fontsize={size}:fontcolor={color}@{opacity:.2f}{font_opt}"
+    return f"drawtext=textfile='{textfile}':expansion=none:{_positions_text(str(wm.get('position', 'br')))}:fontsize={size}:fontcolor={color}@{opacity:.2f}{font_opt}"
 
 
 def _logo_path(wm: dict[str, Any]) -> Path | None:

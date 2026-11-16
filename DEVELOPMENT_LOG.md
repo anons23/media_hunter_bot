@@ -231,3 +231,11 @@ Never record bot tokens or `.env` contents here.
 13. Process cache prunes dead entries and caps `_base_cache`.
 - Tests: `tests/test_review_fixes.py`.
 - ⬜ VPS smoke: add own/foreign channel, send video as file, forward 3 links at once, 90 MB video with autopost, admin Premium grant.
+
+## Mini App editors — 2026-11-16
+- Plate (logo) editor: drag/resize, opacity, timing (all / start / end / custom), fade; one plate per scope, a new upload replaces the old one (placement kept). GIF ≤10 MB / ≤15 s.
+- Found: old logo size used scale2ref `main_w`, which on FFmpeg 6.x is the logo itself → logos were tiny. Plate sizes are now computed from the probed frame; legacy logos are converted (size = % of video width).
+- Text editor: text (≤200 chars, ≤3 lines), 15 bundled Cyrillic fonts (OFL, subset), 18-colour palette + custom colour, effects shadow/outline/box, 10 presets, size as % of video height, free placement. Emoji are stripped (not in fonts). `expansion=none` fixes texts with `%`.
+- > 100 MB videos: nothing is overlaid; user notice.
+- Watermark slot is still one per scope: text OR plate (editor warns before replacing).
+- ⬜ VPS: domain + nginx + certbot, `WEBAPP_URL`, smoke both editors on iOS/Android.
