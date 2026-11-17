@@ -23,6 +23,10 @@ except ValueError:
 
 LOCAL_BOT_API = os.getenv("LOCAL_BOT_API", "").strip()
 
+# TeleAds ad network (teleads.pro). SDK key from the TeleAds dashboard;
+# empty disables ads. Ads are delivered by TeleAds itself via the bot token.
+TELEADS_SDK_KEY = os.getenv("TELEADS_SDK_KEY", "").strip()
+
 # Telegram Mini App (plate editor). Public HTTPS base URL, e.g.
 # https://app.example.com — empty disables the Mini App (button settings
 # are used instead). The bot serves it on WEBAPP_HOST:WEBAPP_PORT behind

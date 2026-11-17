@@ -1486,6 +1486,9 @@ async def main():
         session = None
         bot = Bot(BOT_TOKEN)
     dp = Dispatcher()
+    from . import teleads
+    from .config import TELEADS_SDK_KEY
+    teleads.install(dp, TELEADS_SDK_KEY)
     engine = Engine(bot)
     dp["engine"] = engine
     dp.include_router(router)
